@@ -844,25 +844,6 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
     let file_token = parsed_drives
         .iter()
         .position(|drive| matches!(drive.token, TokenSource::File(_)));
-    if let Some(index) = file_token {
-        // A remote session and a forwarded request are authorized against
-        // the tokens read at startup, which a reload would not reach.
-        let conflict = if remote_sessions {
-            Some("remote_sessions")
-        } else if forwarding.is_some() {
-            Some("forwarding")
-        } else {
-            None
-        };
-        if let Some(conflict) = conflict {
-            return Err(ConfigError::at(
-                &format!("config.http.drives[{index}].token.file"),
-                format!(
-                    "cannot be used with config.http.{conflict}: tokens are not reloaded there; use token.env"
-                ),
-            ));
-        }
-    }
     let token_reload_seconds = match optional_u32(object, "token_reload_seconds", "config.http")? {
         Some(_) if file_token.is_none() => {
             return Err(ConfigError::at(
@@ -4345,40 +4326,41 @@ mod tests {
     }
 
     #[test]
-    fn a_token_file_is_refused_where_tokens_are_not_reloaded() {
-        // Remote sessions and forwarding authorize against the tokens read
-        // at startup: a file that is reloaded would promise a rotation they
-        // do not make.
+    fn a_token_file_is_accepted_with_remote_sessions_and_forwarding() {
+        // Sessions, a cluster owner and a failover candidate all read the
+        // drive's one token set, which a reload replaces.
         let storage = serde_json::json!({
-            "metadata":{"kind":"memory"},"blocks":{"kind":"memory"}
+            "metadata":{"kind":"sqlite","path":"meta.db"},"blocks":{"kind":"memory"}
         });
-        let sessions = serde_json::json!({"version":1,"http":{"remote_sessions":true,"drives":[
+        let drives = serde_json::json!([
             {"id":"first","token":{"env":"TEST_TOKEN"},"driver":{"kind":"splitstore","storage":storage}},
             {"id":"second","token":{"file":"second.token"},"driver":{"kind":"splitstore","storage":storage}}
-        ]}});
-        let error = parse_config_str(&sessions.to_string(), Path::new("."))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("config.http.drives[1].token.file"),
-            "{error}"
-        );
-        assert!(error.contains("config.http.remote_sessions"), "{error}");
-
-        let forwarding = serde_json::json!({"version":1,"http":{"drives":[
-            {"id":"first","token":{"file":"first.token"},"driver":{"kind":"memory"}}
-        ],"forwarding":{
+        ]);
+        let forwarding = serde_json::json!({
             "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
             "bind":"0.0.0.0:0","redis_url":{"env":"MOUNT_REGISTRY"},"namespace":"prod"
-        }}});
-        let error = parse_config_str(&forwarding.to_string(), Path::new("."))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("config.http.drives[0].token.file"),
-            "{error}"
-        );
-        assert!(error.contains("config.http.forwarding"), "{error}");
+        });
+        let mut owner = forwarding.clone();
+        owner["owner"] = true.into();
+        let mut candidate = owner.clone();
+        candidate["failover"] = serde_json::json!({});
+        for http in [
+            serde_json::json!({"remote_sessions":true,"drives":drives}),
+            serde_json::json!({"forwarding":forwarding,"drives":drives}),
+            serde_json::json!({"forwarding":owner,"drives":drives}),
+            serde_json::json!({"remote_sessions":true,"forwarding":owner,"drives":drives}),
+            serde_json::json!({"remote_sessions":true,"forwarding":candidate,
+                "token_reload_seconds":5,"drives":drives}),
+        ] {
+            let source = serde_json::json!({"version":1,"http":http});
+            let spec = parse_config_str(&source.to_string(), Path::new("/config-root"))
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+            let http = spec.http.expect("http");
+            assert_eq!(
+                http.drives[1].token,
+                TokenSource::File("/config-root/second.token".into()),
+            );
+        }
     }
 
     #[test]

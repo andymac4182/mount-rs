@@ -970,10 +970,16 @@ curl -H 'Authorization: Bearer demo-memory' \
         listed even in pages, and a walk through the pages is not a snapshot.
         A token grants full access to its drive; there is no per-user
         identity, token expiry, CORS or TLS in the server. Token-file
-        rotation is refused together with <code>remote_sessions</code> or{' '}
-        <code>forwarding</code>: a cluster still rotates tokens by restart.
-        Metrics are not split by drive and have not been validated with{' '}
-        <code>remote_sessions</code> or <code>forwarding</code>. Each drive
+        rotation also works with <code>remote_sessions</code> and{' '}
+        <code>forwarding</code>, but the file is per server: the owner of a
+        drive checks the token, so the rotation is made on every server that
+        lists the drive, and nothing distributes the file or checks that the
+        servers agree. A session stays with the token that opened it and is
+        closed by idle expiry once that token is dropped; clients open a new
+        session with the new token. Metrics are not split by drive, and in a
+        cluster each server counts what it handled, so a forwarded request
+        is counted by the ingress and by the owner (subtract{' '}
+        <code>mount_rs_http_forwarded_requests_total</code>). Each drive
         has one owner at a time. Failover is opt-in, needs split-store drives
         with exclusive ownership, and cannot move a drive before the failed
         owner’s storage lease expires (240 s by default); requests in flight
@@ -982,8 +988,14 @@ curl -H 'Authorization: Bearer demo-memory' \
         and Redis Cluster are not supported. The session routes, the
         cluster configuration and what a client sees from a cluster are
         covered by the compatibility policy and checked by tests; the
-        server-to-server protocol is internal and clusters of mixed releases
-        are untested, so a cluster is upgraded by stopping every server. The local demo does not prove
+        server-to-server protocol is internal and carries a version: a
+        server refuses a peer whose version it does not speak, with a{' '}
+        <code>503</code> and nothing run. Clusters of mixed releases are
+        tested for one pair of builds only, the current commit with{' '}
+        <code>main</code> at <code>031050cc</code>; no pair of published
+        releases has been run together, so a rolling upgrade between
+        releases should be rehearsed, or the cluster upgraded by stopping
+        every server. The local demo does not prove
         internet-facing deployment security.
       </>
     ),
@@ -1002,7 +1014,10 @@ curl -H 'Authorization: Bearer demo-memory' \
         <code>http-observability</code> runs the all-features health,
         readiness and OTLP checks. The workspace test job on macOS arm64
         passed on the run’s second attempt, after no hosted runner picked it
-        up on the first. Not covered: clusters of mixed releases; Redis
+        up on the first. That run predates the <code>cluster-mixed-release</code>{' '}
+        job, which runs the cluster test with one server on the current
+        commit and one on <code>031050cc</code>. Not covered: clusters of mixed releases built from
+        two published releases; Redis
         Sentinel and Redis Cluster; and any deployed collector, dashboard or
         pager.{' '}
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,

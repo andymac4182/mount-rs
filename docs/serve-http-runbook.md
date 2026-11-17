@@ -145,7 +145,7 @@ keys are rejected. Relative paths resolve against the config file's directory.
 | Key | Type | Required | Valid values |
 | --- | --- | --- | --- |
 | `id` | string | yes | 1-64 characters from `A-Z a-z 0-9 - _ .`; not `.` or `..`; unique in the file. It appears in URLs. |
-| `token` | object | yes | Exactly `{"env": "NAME"}` or exactly `{"file": "PATH"}`. The token itself cannot be written in the config. `env` names a variable read once at startup. `file` names a file that lists the drive's tokens and is read again while the server runs; a relative path is taken from the config file's directory. `file` is refused together with `remote_sessions` or `forwarding`. See [Tokens](#tokens). |
+| `token` | object | yes | Exactly `{"env": "NAME"}` or exactly `{"file": "PATH"}`. The token itself cannot be written in the config. `env` names a variable read once at startup. `file` names a file that lists the drive's tokens and is read again while the server runs; a relative path is taken from the config file's directory. With `remote_sessions` every token in the file must have the form that option requires. See [Tokens](#tokens) and, for `remote_sessions` or `forwarding`, [Token rotation in a cluster](#token-rotation-in-a-cluster). |
 | `driver` | object | yes | A `memory`, `host`, `sqlite` or `splitstore` driver object, in the same shape as native mount configs. `remote` is rejected. |
 
 `memory` drives lose all data on restart. Do not serve one in production.
@@ -271,10 +271,11 @@ What to know:
   the signal ends the process, as it always has.
 - A mounted Kubernetes Secret is updated by the kubelet by renaming, so it
   is picked up by the timer with no signal.
-- `token.file` cannot be used together with `remote_sessions` or
-  `forwarding`; the config is refused. A remote session and a forwarded
-  request are authorized against the token read at startup, which a reload
-  would not reach. Servers with those features rotate by restart.
+- `token.file` works with `remote_sessions` and `forwarding` too: the file
+  routes, the session routes and the owner of a drive in a cluster all read
+  the one set of tokens a reload replaces. What changes there (which
+  servers hold the file, what happens to open sessions, the stricter token
+  form) is in [Token rotation in a cluster](#token-rotation-in-a-cluster).
 
 A drive whose token is an environment variable **rotates by restart**:
 
@@ -646,8 +647,8 @@ line to stderr for every request, when the request is over:
 | `unix_ms` | When the line was recorded, in milliseconds since the Unix epoch. |
 | `request_id` | The response's `X-Request-Id`. |
 | `method` | The request method. |
-| `route` | The route's template as in the API guide's route table, for example `/v1/drives/{id}/fs/{path}` (also for the drive root) or `/v1/drives/{id}/ops/rename`. `unmatched` for a path that is no route (404), `invalid` for a path rejected before routing (400). **Never the path.** |
-| `drive` | The drive id, only when the request named a drive of this config, whether or not its token was right. Absent otherwise: an id that is not configured is client text and is not written. With `remote_sessions` or `forwarding` the field is always absent. |
+| `route` | The route's template as in the API guide's route table, for example `/v1/drives/{id}/fs/{path}` (also for the drive root) or `/v1/drives/{id}/ops/rename`. `unmatched` for a path that is no route (404), `invalid` for a path rejected before routing (400). With `remote_sessions` or `forwarding`, also `/v1/drives/{id}/sessions` and `/v1/drives/{id}/sessions/handles`; on any other server those paths are `unmatched`. **Never the path.** |
+| `drive` | The drive id, only when the request named a drive of this config, whether or not its token was right. Absent otherwise: an id that is not configured is client text and is not written. With `remote_sessions` or `forwarding` the field is absent on every line for a request the server's own listener received; the owner of a drive writes it on the line for a request another server forwarded to it. |
 | `status` | The response status. `null` when there was no response: the client disconnected first, or shutdown ran out of drain time. |
 | `duration_ms` | From the request's arrival until its response body was sent in full or abandoned. For a download this includes the time the client took to read it. |
 | `bytes_in` | Request body bytes the server read. |
@@ -729,12 +730,13 @@ text format. It is off unless configured:
 
 | Series | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `mount_rs_http_requests_total` | counter | `route`, `method`, `status` | Requests finished. `route` is the route template the access log uses (`/v1/drives/{id}/fs/{path}`, `/readyz`, `unmatched`, `invalid`). `method` is `GET`, `HEAD`, `PUT`, `POST`, `DELETE`, `OPTIONS`, `PATCH` or `other`. `status` is the class: `1xx` to `5xx`, or `none` for a request that ended before a response (the client went away, or a shutdown ran out of drain time). |
+| `mount_rs_http_requests_total` | counter | `route`, `method`, `status` | Requests finished. `route` is the route template the access log uses (`/v1/drives/{id}/fs/{path}`, `/readyz`, `unmatched`, `invalid`; with `remote_sessions` or `forwarding` also `/v1/drives/{id}/sessions` and `/v1/drives/{id}/sessions/handles`). `method` is `GET`, `HEAD`, `PUT`, `POST`, `DELETE`, `OPTIONS`, `PATCH` or `other`. `status` is the class: `1xx` to `5xx`, or `none` for a request that ended before a response (the client went away, or a shutdown ran out of drain time). |
 | `mount_rs_http_request_duration_seconds` | histogram | `route` | From a request's arrival until its response body was sent or abandoned: a download's time includes the client reading it. Buckets from 5 ms to 300 s. |
 | `mount_rs_http_requests_in_flight` | gauge | | Requests that have arrived and are not finished. |
 | `mount_rs_http_request_body_bytes_total` | counter | | Request body bytes read. |
 | `mount_rs_http_response_body_bytes_total` | counter | | Response body bytes handed to connections. |
-| `mount_rs_http_drive_ready` | gauge | `drive` | 1 while the drive is ready as `/readyz` counts it, 0 while it is not (see [Health checks](#health-checks)). `drive` is the configured drive id. |
+| `mount_rs_http_forwarded_requests_total` | counter | | Requests this server received from another server of the cluster, which forwarded them here. They are in `mount_rs_http_requests_total` as well. Always 0 on a server that owns no drive of a forwarding cluster. See [Probes, logs and metrics in a cluster](#probes-logs-and-metrics-in-a-cluster). |
+| `mount_rs_http_drive_ready` | gauge | `drive` | 1 while the drive is ready as `/readyz` counts it, 0 while it is not (see [Health checks](#health-checks)). `drive` is the configured drive id. With `forwarding`, a server has a series for each drive it owns at the moment of the scrape and none for any other. |
 | `mount_rs_http_access_log_dropped_lines_total` | counter | | Access-log lines dropped because stderr was not being read. Present only with `"access_log": true`. |
 | `process_start_time_seconds` | gauge | | When the process started counting, as Unix time. A change means a restart, and every counter began again at zero. |
 | `mount_rs_build_info` | gauge | `version` | Always 1; `version` is the version of the binary. |
@@ -754,9 +756,10 @@ Limits:
 - Requests refused before they are read (connections over
   `max_connections`, a connection that sends no valid request) are not
   counted. `http_accept_failed` is still a stderr line only.
-- With `forwarding.owner`, drives are served through the
-  peer listener and have no `mount_rs_http_drive_ready` series. The metrics
-  have not been validated with `remote_sessions` or `forwarding`.
+- With `remote_sessions` or `forwarding`, each server counts what it did
+  itself, so a forwarded request is counted on two servers. What each
+  counts, and how to add the servers up, is in
+  [Probes, logs and metrics in a cluster](#probes-logs-and-metrics-in-a-cluster).
 
 Example scrape config and the queries behind the alerts below:
 
@@ -1025,7 +1028,7 @@ a value out of range is refused at startup (exit code 2), and
 
 | Key | Type | Default | Range | Meaning |
 | --- | --- | --- | --- | --- |
-| `remote_sessions` | boolean | `false` | | Serve the session and handle routes on every drive. Requires every drive to be `splitstore`, every drive token to be 32-256 characters from `A-Z a-z 0-9 - . _ ~ + / =`, and no `token.file`. |
+| `remote_sessions` | boolean | `false` | | Serve the session and handle routes on every drive. Requires every drive to be `splitstore` and every drive token to be 32-256 characters from `A-Z a-z 0-9 - . _ ~ + / =`, whether it comes from a variable or from a token file. |
 | `sessions` | object | all defaults | | Only valid with `remote_sessions: true`. |
 | `sessions.max_sessions` | integer | `4096` | 1-65536 | Sessions the process admits across all drives. |
 | `sessions.max_sessions_per_drive` | integer | `128` | 1-4096 | Sessions one drive admits. A session needs room in both. |
@@ -1071,8 +1074,9 @@ unavailable is governed by the drive's own `driver.storage.lease_ttl_ms`
 
 Restrictions on other keys when a cluster feature is on:
 
-- `token.file` is refused with `remote_sessions` or `forwarding`. Tokens are
-  environment variables and rotate by restart.
+- With `remote_sessions`, every line of a `token.file` must be a token in
+  the form above. A file with one that is not stops startup (exit 2), and
+  at a reload is refused whole like any other file that is not valid.
 - `drives` may be `[]` only with `forwarding`.
 
 ### Worked example: three servers with failover
@@ -1406,6 +1410,10 @@ Alert on `open_failed` and `release_failed`, and on `lease_held` or
   remote drive does **not** do this by itself (see the CLI README).
 - Each owner applies the `sessions` limits of its own config. A drive that
   moves to a candidate with different limits gets those.
+- Every session request carries the drive's bearer token and is checked
+  against the tokens the drive accepts when the request arrives. A session
+  belongs to the token it was opened with and does not survive that
+  token: see [Token rotation in a cluster](#token-rotation-in-a-cluster).
 - A session and each open handle hold memory and storage state on the
   owner. Raise the limits with the process's memory in mind.
 - Shutdown closes the listener, drains for up to `drain_timeout_ms`, closes
@@ -1424,23 +1432,119 @@ Alert on `open_failed` and `release_failed`, and on `lease_held` or
   cluster (for example `GET /v1/drives/<id>/statfs`) and alert on anything
   but `200`.
 - `GET /v1/drives` lists only drives the answering server owns.
-- With `access_log`, the `drive` field is absent on a server with
-  `remote_sessions` or `forwarding`.
-- Metrics (`http.metrics`) were not validated with `remote_sessions` or
-  `forwarding`, and an owner's drives have no `mount_rs_http_drive_ready`
-  series. Use the probes and the stderr events above.
+- With `access_log`, the `drive` field is absent on the lines a server
+  with `remote_sessions` or `forwarding` writes for requests its own
+  listener received. The owner's line for a forwarded request has it.
+- With `http.metrics`, **each server counts the requests it handled, each
+  once**:
+
+  | Server | Counts in `mount_rs_http_requests_total` | `mount_rs_http_forwarded_requests_total` | `mount_rs_http_drive_ready` |
+  | --- | --- | --- | --- |
+  | Single server with `remote_sessions` | Every request its listener received, file routes and session routes | 0 | Every configured drive |
+  | Ingress (`forwarding`, owns nothing) | Every request its listener received, with the status it gave the client: the owner's answer, or its own `400`, `502` or `503` when it did not or could not forward | 0 | No series |
+  | Owner (`forwarding.owner`) | Every request its listener received, and every request another server forwarded to it and it dispatched to the drive | The forwarded ones only | The drives it owns at the scrape. With `failover`, a standby has none |
+
+  So a request that is forwarded is counted **twice in the cluster**: once
+  by the server the client reached and once by the owner. The same holds
+  for the duration histogram, the byte counters and
+  `mount_rs_http_requests_in_flight`. To count each client request once
+  over the whole cluster, subtract the forwarded ones:
+
+  ```promql
+  sum(rate(mount_rs_http_requests_total[5m]))
+    - sum(rate(mount_rs_http_forwarded_requests_total[5m]))
+  ```
+
+  `mount_rs_http_forwarded_requests_total` has no labels, so this works for
+  the total only; per route or status, use the ingress servers' series for
+  what clients were answered and the owners' for what the drives did.
+- The owner's duration for a forwarded request starts when the request
+  reaches it and leaves out the hop from the ingress. The ingress's
+  duration is what the client waited.
+- A forwarded request that the owner refuses before it reaches the drive
+  (it no longer owns the drive, or the route is stale: the ingress turns
+  these into `503`) is counted by the ingress and not by the owner.
+- The session routes have their own route templates,
+  `/v1/drives/{id}/sessions` and `/v1/drives/{id}/sessions/handles`, on
+  every server with `remote_sessions` or `forwarding`.
+- A drive nobody owns has no `mount_rs_http_drive_ready` series anywhere.
+  Alert on the end-to-end probe above, or on
+  `absent(mount_rs_http_drive_ready{drive="<id>"})` over all candidates.
+
+### Token rotation in a cluster
+
+A drive's token is checked by **the server that owns the drive**, against
+the tokens that server accepts at that moment. An ingress has no drive and
+no token: it forwards the request with its `Authorization` header and the
+owner decides. So a token file belongs on every server that lists the
+drive, which with `failover` is every candidate, and
+[Rotation](#rotation) is done on each of them:
+
+1. Put the new token first and the old one second in the file **on every
+   server that lists the drive**.
+2. Wait for each of those servers to write
+   `{"event":"http_token_reload",...,"outcome":"reloaded","tokens":2}`.
+   A standby reloads its file like an owner, so that it serves the drive
+   with the current tokens the moment it takes it over.
+3. Move the consumers to the new token.
+4. Remove the old token's line on every server, and wait for
+   `"tokens":1` from each.
+
+What to know:
+
+- **Do not move consumers before every candidate has reloaded.** Until
+  then the new token works or gets `401` depending on which candidate owns
+  the drive, and a failover in that window changes the answer.
+- A forwarded request is checked when it reaches the owner. There is no
+  second check at the ingress and no window in which the ingress and the
+  owner disagree.
+- With `remote_sessions` every token of the file must be 32-256 characters
+  from `A-Z a-z 0-9 - . _ ~ + / =`. A file with a token that is not is
+  refused whole, so the file routes and the session routes always accept
+  the same tokens.
+- **Open sessions belong to the token that opened them.** During the
+  overlap a session opened with the old token keeps working with the old
+  token; the new token does not reach it (`403 EACCES`, as for a session
+  that does not exist) and opens sessions of its own. From the reload that
+  drops the old token, every request with it gets `401`, session and
+  handle requests included, exactly as a token that was never valid.
+  Nothing can then reach the sessions it opened: the server closes each,
+  with its handles, once it has been idle for
+  `sessions.idle_timeout_seconds` (60 by default), and until then it still
+  counts towards `max_sessions_per_drive` and `max_sessions`. A rotation
+  closes no session of a token that stays.
+- A client moves to the new token by opening a new session with it.
+  `mount-rs mount` with a remote drive reads its token once: remount it
+  with the new token during the overlap. A mount left on a dropped token
+  fails every operation with `EACCES`.
+- To revoke at once, write a file with only the new token on every server
+  that lists the drive and send each `SIGHUP`.
+- A drive whose token is an environment variable still rotates by
+  restarting every server that lists it, with no overlap.
 
 ### Upgrading a cluster
 
-Running servers of different releases in one cluster is **not tested** and
-not supported: the server-to-server protocol and the Redis records carry no
-version negotiation. See
-[`serve-http-upgrade.md`](serve-http-upgrade.md#clusters). The supported
-procedure is a full stop of every server followed by a start of every
-server on the new release. With failover, a rolling restart *of one
-release* (for a config change or a host reboot) is supported and is what
-the clean-stop row above measures: stop one server with SIGTERM, wait for
-its drives to be `published` on another, start it again, move on.
+The server-to-server protocol has a version (currently 1), named on every
+forwarded request and in each drive's route record. A server refuses a peer
+whose version it does not speak instead of misreading it: the client gets
+`503` with `x-mount-dispatch: not-dispatched`, and the server writes a
+`peer_protocol_refused` line on stderr. See
+[`serve-http-upgrade.md`](serve-http-upgrade.md#clusters) for the rule, the
+rolling upgrade procedure and the full-stop procedure.
+
+What is tested is one pair of builds: the current commit in a cluster with
+`main` at `031050cc`, in both arrangements (CI job `cluster-mixed-release`:
+forwarding, sessions, membership reload and failover hand-off between the
+two). No pair of published releases has been run together. The policy is
+that two adjacent releases may share a cluster for the length of an
+upgrade, one server at a time; any other pair is upgraded by stopping every
+server and starting every server on the new release.
+
+With failover, a rolling restart *of one release* (for a config change or
+a host reboot) is supported and is what the clean-stop row above measures:
+stop one server with SIGTERM, wait for its drives to be `published` on
+another, start it again, move on. A rolling upgrade is the same with the
+binary replaced in between.
 
 ### Cluster failure modes
 
@@ -1452,9 +1556,10 @@ its drives to be `published` on another, start it again, move on.
 | `502` with `x-mount-dispatch: unknown` in bursts | An owner crashed or was removed from the membership with requests in flight; or its route outlived it (up to 15 s) | None for the server. Clients re-read or repeat with preconditions. |
 | `502` on every request through one new server | The owners have not loaded a membership file that lists it | Distribute the file and `SIGHUP` them. |
 | Start fails, code 1, naming Redis (`rediss://host:port`) | Redis unreachable, wrong CA, wrong or missing password | Fix as the message says. The URL's credentials are never printed. |
-| Start fails, code 2, `config.http.forwarding...` | A key out of range, `failover` without `owner`, `memory` metadata with failover, a `token.file`, a non-`splitstore` drive | Fix the config; `validate-config` reports the same. |
+| Start fails, code 2, `config.http.forwarding...` | A key out of range, `failover` without `owner`, `memory` metadata with failover, a non-`splitstore` drive | Fix the config; `validate-config` reports the same. |
 | `membership reload refused` on stderr | The new file is invalid or would cut this server off | Fix the file. The old membership is still in force. |
 | An owner without failover exits with code 1 while running | It lost a drive's lease, or another server registered the drive | Find out why two servers claim the drive before restarting. |
+| `503` with `x-mount-dispatch: not-dispatched` for a drive whose owner is up, and `peer_protocol_refused` on stderr of the forwarding server or the owner | The two servers run releases that share no version of the server-to-server protocol | Finish the upgrade, or roll the newer server back. The line names the peer, what it accepts or offered, and what this server speaks. Nothing was run. |
 | `drive_failover` `lease_held` that never ends | The previous owner is alive and still holds the lease but cannot publish its route (cut off from Redis) | Fix that owner's Redis connection, or stop it so the lease is released. |
 
 ### Known limits
@@ -1467,14 +1572,19 @@ Stated plainly. None of these is hidden behind a feature flag.
    the drive definitions in one place and generate the configs from it.
    (`memory` metadata is refused with failover for this reason; other kinds
    cannot be compared by the server.)
-2. **No token rotation without a restart.** `token.file` is refused with
-   `remote_sessions` or `forwarding`. A token change is a restart of every
-   server that lists the drive, with no period in which both tokens work.
+2. **A token file is per server.** Rotation without a restart needs
+   `token.file` and the same change made on every server that lists the
+   drive; nothing distributes the file or checks that the candidates
+   agree. Sessions do not move to the new token: clients open new ones
+   (see [Token rotation in a cluster](#token-rotation-in-a-cluster)).
 3. **One pin per server.** A key rotation needs that server restarted and
    leaves it cut off between the others' reload and its restart. A CA
    rotation needs every server restarted.
-4. **Mixed-release clusters are not tested.** An upgrade is a full stop and
-   start.
+4. **Mixed-release clusters are tested for one pair of builds only**: the
+   current commit with `main` at `031050cc`. A rolling upgrade between
+   published releases has not been run; rehearse it, or stop every server.
+   A peer of an incompatible protocol version is refused with `503`, not
+   misread.
 5. **Redis high availability is not tested.** One endpoint only; no
    Sentinel, no Redis Cluster. Behaviour across a replica promotion is
    inferred from the outage tests, not measured.
@@ -1501,8 +1611,9 @@ Stated plainly. None of these is hidden behind a feature flag.
 13. **The session routes answer `500` for most filesystem errors**
     (`EEXIST`, `ENOTEMPTY`, `EISDIR`, ...), where the file routes use
     `409`, `400` and so on. Clients branch on `code`.
-14. **Metrics and the access log's `drive` field** are not available as on
-    a single server (see above).
+14. **Metrics are per server and not split by drive.** A forwarded request
+    is counted by the ingress and by the owner, and the access log's
+    `drive` field is absent on a listener's own lines (see above).
 15. **Clocks.** Candidates and the metadata store must agree to within a
     second or two (NTP is enough). Beyond the 5-second renewal margin a
     deposed owner can answer *reads* from its last committed state after a
@@ -1552,7 +1663,8 @@ Secrets
 - [ ] Each drive has its own random token, delivered through the secret
       mechanism, not the command line or the config file.
 - [ ] Drives that must rotate without a restart take their token from a
-      file (`token.file`) that only the service user can read.
+      file (`token.file`) that only the service user can read. In a
+      cluster, every server that lists the drive has the file.
 - [ ] Consumers know how a rotation reaches them: with a token file, a
       period in which both tokens work and then `401` for the old one; with
       an environment variable, a restart after which the old token stops

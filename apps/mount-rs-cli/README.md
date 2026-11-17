@@ -358,9 +358,16 @@ To rotate: put the new token on the first line and keep the old one on the
 second; move the clients; then remove the old line. Replace the file by
 renaming a new one into place.
 
-`token.file` is refused together with `http.remote_sessions` or
-`http.forwarding`: those authorize against the token read at startup. A
-server with no token file does not handle `SIGHUP` for tokens.
+`token.file` works with `http.remote_sessions` and `http.forwarding` as
+well. With `remote_sessions` every token in the file must be 32-256
+characters from `A-Z a-z 0-9 - . _ ~ + / =`, and a session stays with the
+token that opened it: it does not move to the new token, and once its token
+is dropped it is closed by idle expiry. With `forwarding` the owner of a
+drive checks the token, so the file belongs on every server that lists the
+drive (every failover candidate), and the rotation is made on each. See the
+runbook's
+[Token rotation in a cluster](../../docs/serve-http-runbook.md#token-rotation-in-a-cluster).
+A server with no token file does not handle `SIGHUP` for tokens.
 
 ### Metrics
 
@@ -381,6 +388,15 @@ request and response body bytes, readiness per drive
 `process_start_time_seconds` and `mount_rs_build_info{version=...}`. No path
 or token appears in them. The
 [runbook](../../docs/serve-http-runbook.md#metrics) has the full table.
+
+With `remote_sessions` or `forwarding` each server counts the requests it
+handled, each once, and the session routes have route templates of their
+own. A forwarded request is therefore counted by the server the client
+reached and by the owner, which also counts it in
+`mount_rs_http_forwarded_requests_total`; subtract that to count client
+requests once over a cluster. An owner reports
+`mount_rs_http_drive_ready` for the drives it owns at the scrape. See
+[Probes, logs and metrics in a cluster](../../docs/serve-http-runbook.md#probes-logs-and-metrics-in-a-cluster).
 
 ### Network exposure
 

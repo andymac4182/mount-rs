@@ -166,7 +166,11 @@ impl DriveTokens {
     /// Whether `candidate` is one of the tokens. Every token is compared
     /// in full, whether or not an earlier one matched, so the time taken
     /// says nothing about which token it was or how much of one matched.
-    fn matches(&self, candidate: &str) -> bool {
+    ///
+    /// Public for an application that authorizes a drive's requests itself
+    /// (the session routes of a cluster), so that it reads the same set as
+    /// the drive's own routes and follows a rotation with them.
+    pub fn matches(&self, candidate: &str) -> bool {
         let tokens = self.0.load();
         let mut matched = false;
         for token in tokens.iter() {
@@ -320,6 +324,11 @@ impl DriveRegistry {
         self.drives.keys().map(String::as_str)
     }
 
+    /// The drives, ordered by id.
+    pub(crate) fn drives(&self) -> impl Iterator<Item = &DriveConfig> {
+        self.drives.values()
+    }
+
     pub fn len(&self) -> usize {
         self.drives.len()
     }
@@ -358,6 +367,12 @@ pub struct AccessRecord<'a> {
     /// Response body bytes handed to the connection. A `HEAD` response
     /// counts none, and a download that was cut short counts what it sent.
     pub bytes_out: u64,
+    /// The request did not arrive on a listener of this process: it was
+    /// given to the application by another transport
+    /// ([`HttpServer::handle`]). On the owner of a drive in a forwarding
+    /// cluster that is a request another server forwarded to it, which
+    /// that server has counted as well.
+    pub from_peer: bool,
 }
 
 /// Receives one [`AccessRecord`] per request.
@@ -743,11 +758,34 @@ impl HttpServer {
         self.handle_in(state, request).await
     }
 
+    /// Give one request from an alternate transport to `handler` in place
+    /// of this application's own routes, observed as those are: it gets its
+    /// request id here and is reported to the access log (and so counted
+    /// by the metrics) once, by the first application of this process to
+    /// see it. Everything else is the handler's: authorization, limits,
+    /// the response and what happens during shutdown.
+    ///
+    /// For routes that belong beside a drive's own and are served by
+    /// something else (the session routes of a cluster owner), which would
+    /// otherwise be invisible in that server's log and metrics.
+    pub async fn handle_observed(
+        &self,
+        handler: &dyn HttpRequestHandler,
+        mut request: Request<HttpBody>,
+    ) -> Response<HttpBody> {
+        mark_peer_delivery(&mut request);
+        let id = assign_request_id(&mut request);
+        let observed = ObservedRequest::begin(&mut request, id.as_ref(), &self.state, true);
+        let response = handler.handle(request).await;
+        ObservedRequest::finish(observed, with_request_id(response, id))
+    }
+
     async fn handle_in(
         &self,
         state: Arc<AppState>,
-        request: Request<HttpBody>,
+        mut request: Request<HttpBody>,
     ) -> Response<HttpBody> {
+        mark_peer_delivery(&mut request);
         self.connections.fetch_add(1, Ordering::AcqRel);
         let _guard = ConnectionGuard {
             counter: self.connections.clone(),
@@ -773,7 +811,7 @@ impl HttpServer {
         if self.closing.load(Ordering::Acquire) != 0 {
             let mut request = request;
             let id = assign_request_id(&mut request);
-            let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state);
+            let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state, false);
             let response = with_request_id(error_response(RequestError::server_closing()), id);
             return ObservedRequest::finish(observed, response);
         }
@@ -1470,6 +1508,19 @@ impl HttpResponseFailure {
 #[derive(Clone, Copy)]
 struct RequestScope;
 
+/// Marks a request that an application was handed by a transport other
+/// than a listener of this process: see [`AccessRecord::from_peer`].
+#[derive(Clone, Copy)]
+struct PeerDelivered;
+
+/// Mark `request` as [`PeerDelivered`] if no listener of this process has
+/// settled its id, which is to say none received it.
+fn mark_peer_delivery(request: &mut Request<HttpBody>) {
+    if request.extensions().get::<RequestScope>().is_none() {
+        request.extensions_mut().insert(PeerDelivered);
+    }
+}
+
 /// Carried by a request that a listener gave to its handler: the shutdown
 /// of that listener. An application the handler passes the request to
 /// (`HttpServer::handle`) is closed only after the listener has drained, so
@@ -1548,7 +1599,10 @@ async fn handle_request(
             .extensions_mut()
             .insert(ListenerShutdown(state.config.control.clone()));
     }
-    let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state);
+    // A listener with a handler in front of it (session routing, forwarding)
+    // may serve the session routes; one without has none.
+    let sessions = state.handler.is_some();
+    let observed = ObservedRequest::begin(&mut request, id.as_ref(), &state, sessions);
     let response = match handle_request_instrumented(request, state).await {
         Ok(response) => response,
         Err(never) => match never {},
@@ -1562,7 +1616,14 @@ async fn handle_request(
 /// The template of the route a request path names and, when the path names
 /// a configured drive, that drive's id. Decoding follows `parse_route`, so
 /// a request is labelled as it is routed.
-fn describe_route<'a>(path: &str, registry: &'a DriveRegistry) -> (&'static str, Option<&'a str>) {
+///
+/// `sessions` says whether the session routes of a cluster may be served
+/// behind this listener; where they cannot be, their paths are no route.
+fn describe_route<'a>(
+    path: &str,
+    registry: &'a DriveRegistry,
+    sessions: bool,
+) -> (&'static str, Option<&'a str>) {
     let Ok(segments) = decode_uri_segments(path) else {
         return ("invalid", None);
     };
@@ -1594,6 +1655,10 @@ fn describe_route<'a>(path: &str, registry: &'a DriveRegistry) -> (&'static str,
             Some("sync") => "/v1/drives/{id}/ops/sync",
             _ => return ("unmatched", None),
         },
+        (Some("sessions"), 4) if sessions => "/v1/drives/{id}/sessions",
+        (Some("sessions"), 5) if sessions && segment(4) == Some("handles") => {
+            "/v1/drives/{id}/sessions/handles"
+        }
         _ => return ("unmatched", None),
     };
     (route, registry.get(drive).map(DriveConfig::id))
@@ -1613,6 +1678,7 @@ struct ObservedRequest {
     received: Arc<AtomicU64>,
     status: Option<u16>,
     sent: u64,
+    from_peer: bool,
 }
 
 impl ObservedRequest {
@@ -1622,12 +1688,14 @@ impl ObservedRequest {
         request: &mut Request<HttpBody>,
         id: Option<&header::HeaderValue>,
         state: &AppState,
+        sessions: bool,
     ) -> Option<Box<Self>> {
         let log = state.config.access_log.as_ref()?;
         let id = id?;
         let started = Instant::now();
         log.begin();
-        let (route, drive) = describe_route(request.uri().path(), &state.registry);
+        let (route, drive) = describe_route(request.uri().path(), &state.registry, sessions);
+        let from_peer = request.extensions().get::<PeerDelivered>().is_some();
         let received = Arc::new(AtomicU64::new(0));
         let body = std::mem::replace(request.body_mut(), empty_body());
         *request.body_mut() = CountedRequestBody {
@@ -1645,6 +1713,7 @@ impl ObservedRequest {
             received,
             status: None,
             sent: 0,
+            from_peer,
         }))
     }
 
@@ -1670,6 +1739,7 @@ impl Drop for ObservedRequest {
             duration: self.started.elapsed(),
             bytes_in: self.received.load(Ordering::Relaxed),
             bytes_out: self.sent,
+            from_peer: self.from_peer,
         });
     }
 }
@@ -4453,6 +4523,214 @@ mod tests {
         async fn close(&self) -> mount_rs_core::Result<()> {
             self.release.notified().await;
             Ok(())
+        }
+    }
+
+    /// What the access log was told, for the tests below.
+    #[derive(Debug, Default)]
+    struct Told(std::sync::Mutex<Vec<ToldRecord>>);
+
+    /// Route template, drive, status and whether it came from a peer.
+    type ToldRecord = (&'static str, Option<String>, Option<u16>, bool);
+
+    impl AccessLog for Told {
+        fn record(&self, record: &AccessRecord<'_>) {
+            self.0.lock().unwrap().push((
+                record.route,
+                record.drive.map(str::to_owned),
+                record.status,
+                record.from_peer,
+            ));
+        }
+    }
+
+    /// Answers 201 to everything, as the session routes of a cluster do
+    /// for a session that was made.
+    struct Created;
+
+    impl HttpRequestHandler for Created {
+        fn handle(
+            &self,
+            _request: Request<HttpBody>,
+        ) -> Pin<Box<dyn std::future::Future<Output = Response<HttpBody>> + Send + '_>> {
+            Box::pin(async {
+                let mut response = Response::new(empty_body());
+                *response.status_mut() = StatusCode::CREATED;
+                response
+            })
+        }
+    }
+
+    /// Gives every request to an application behind it: its session routes
+    /// to `Created`, the rest to the application's own routes.
+    struct Front(Arc<HttpServer>);
+
+    impl HttpRequestHandler for Front {
+        fn handle(
+            &self,
+            request: Request<HttpBody>,
+        ) -> Pin<Box<dyn std::future::Future<Output = Response<HttpBody>> + Send + '_>> {
+            Box::pin(async move {
+                if request.uri().path().contains("/sessions") {
+                    self.0.handle_observed(&Created, request).await
+                } else {
+                    self.0.handle(request).await
+                }
+            })
+        }
+    }
+
+    fn told_application(told: &Arc<Told>) -> HttpServer {
+        let mut registry = DriveRegistry::new();
+        registry
+            .register(DriveConfig::new("d", Arc::new(MemoryFs::empty()), "test-secret").unwrap())
+            .unwrap();
+        HttpServer::unbound(
+            registry,
+            HttpServerOptions {
+                access_log: Some(Arc::clone(told) as Arc<dyn AccessLog>),
+                ..HttpServerOptions::default()
+            },
+        )
+    }
+
+    fn handed(method: &str, path: &str) -> Request<HttpBody> {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, "Bearer test-secret")
+            .body(empty_body())
+            .unwrap()
+    }
+
+    /// An application that another transport hands requests to (the owner
+    /// of a drive in a forwarding cluster) reports each once, as from a
+    /// peer, whether its own routes serve it or a handler beside them, and
+    /// the session routes under their own templates.
+    #[tokio::test]
+    async fn a_request_another_transport_hands_over_is_reported_once_as_from_a_peer() {
+        let told = Arc::new(Told::default());
+        let application = told_application(&told);
+
+        let stat = application.handle(handed("GET", "/v1/drives/d/stat")).await;
+        assert_eq!(stat.status(), StatusCode::OK);
+        drop(stat);
+        for path in ["/v1/drives/d/sessions", "/v1/drives/d/sessions/handles"] {
+            let made = application
+                .handle_observed(&Created, handed("POST", path))
+                .await;
+            assert_eq!(made.status(), StatusCode::CREATED);
+            // The id is settled here, as for the application's own routes.
+            assert!(made.headers().contains_key(REQUEST_ID_HEADER));
+        }
+        // Not a session route, though it is beside them.
+        drop(
+            application
+                .handle_observed(&Created, handed("POST", "/v1/drives/d/sessions/other"))
+                .await,
+        );
+        let drive = Some("d".to_owned());
+        assert_eq!(
+            *told.0.lock().unwrap(),
+            [
+                (
+                    "/v1/drives/{id}/stat/{path}",
+                    drive.clone(),
+                    Some(200),
+                    true
+                ),
+                ("/v1/drives/{id}/sessions", drive.clone(), Some(201), true),
+                ("/v1/drives/{id}/sessions/handles", drive, Some(201), true),
+                ("unmatched", None, Some(201), true),
+            ]
+        );
+    }
+
+    /// A request a listener of this process received is reported by that
+    /// listener, once, and not as from a peer, however many applications
+    /// it passes through behind the listener's handler.
+    #[tokio::test]
+    async fn a_request_a_listener_received_is_reported_by_it_alone_and_not_as_from_a_peer() {
+        let told = Arc::new(Told::default());
+        let application = Arc::new(told_application(&told));
+        let listener = HttpServer::start_with_handler(
+            Arc::new(Front(Arc::clone(&application))),
+            HttpServerOptions {
+                access_log: Some(Arc::clone(&told) as Arc<dyn AccessLog>),
+                ..HttpServerOptions::default()
+            },
+        )
+        .await
+        .expect("listener");
+        for (method, path, status) in [
+            ("GET", "/v1/drives/d/stat", 200),
+            ("POST", "/v1/drives/d/sessions", 201),
+        ] {
+            let response = listener.handle(handed(method, path)).await;
+            assert_eq!(response.status().as_u16(), status);
+        }
+        // The listener holds no drive itself, so it names none.
+        assert_eq!(
+            *told.0.lock().unwrap(),
+            [
+                ("/v1/drives/{id}/stat/{path}", None, Some(200), true),
+                ("/v1/drives/{id}/sessions", None, Some(201), true),
+            ]
+        );
+        told.0.lock().unwrap().clear();
+
+        // The same two over the listener's socket: received here.
+        let address = format!("127.0.0.1:{}", listener.port());
+        for (method, path) in [
+            ("GET", "/v1/drives/d/stat"),
+            ("POST", "/v1/drives/d/sessions"),
+        ] {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut stream = tokio::net::TcpStream::connect(&address).await.unwrap();
+            let head = format!(
+                "{method} {path} HTTP/1.1\r\nhost: {address}\r\nauthorization: Bearer test-secret\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            let mut answer = Vec::new();
+            stream.read_to_end(&mut answer).await.unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while told.0.lock().unwrap().len() < 2 {
+            assert!(Instant::now() < deadline, "{:?}", told.0.lock().unwrap());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            *told.0.lock().unwrap(),
+            [
+                ("/v1/drives/{id}/stat/{path}", None, Some(200), false),
+                ("/v1/drives/{id}/sessions", None, Some(201), false),
+            ]
+        );
+        listener.close().await.expect("close listener");
+        application.close().await.expect("close application");
+    }
+
+    /// The session routes are routes only where something may serve them:
+    /// a listener with no handler in front has none.
+    #[test]
+    fn the_session_paths_are_routes_only_behind_a_handler() {
+        let registry = DriveRegistry::new();
+        for (path, template) in [
+            ("/v1/drives/d/sessions", "/v1/drives/{id}/sessions"),
+            (
+                "/v1/drives/d/sessions/handles",
+                "/v1/drives/{id}/sessions/handles",
+            ),
+        ] {
+            assert_eq!(describe_route(path, &registry, true).0, template);
+            assert_eq!(describe_route(path, &registry, false).0, "unmatched");
+        }
+        for path in [
+            "/v1/drives/d/sessions/handles/7",
+            "/v1/drives/d/sessions/other",
+            "/v1/drives/d/session",
+        ] {
+            assert_eq!(describe_route(path, &registry, true).0, "unmatched");
         }
     }
 

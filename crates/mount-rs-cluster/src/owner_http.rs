@@ -8,7 +8,9 @@ use crate::{
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
-use mount_rs_http::{BoxError, DriveConfig, DriveRegistry, HttpServer, HttpServerOptions};
+use mount_rs_http::{
+    BoxError, DriveConfig, DriveRegistry, DriveTokens, HttpServer, HttpServerOptions,
+};
 use mount_rs_sdk::Filesystem;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -102,11 +104,25 @@ impl OwnerHttpHandler {
         bearer_token: String,
         options: HttpServerOptions,
     ) -> Result<Self, RegistryError> {
+        let tokens =
+            DriveTokens::new(vec![bearer_token]).map_err(|_| RegistryError::InvalidInput)?;
+        Self::with_tokens(filesystem, route, tokens, options).await
+    }
+    /// As [`new`](Self::new), for a drive whose accepted tokens may be
+    /// replaced while it is served: keep a clone of `tokens` and
+    /// [`DriveTokens::replace`] the set. A request, forwarded or not, is
+    /// checked against the set in force when it reaches this owner.
+    pub async fn with_tokens(
+        filesystem: Arc<Filesystem>,
+        route: VolumeRoute,
+        tokens: DriveTokens,
+        options: HttpServerOptions,
+    ) -> Result<Self, RegistryError> {
         route.encode()?;
         if filesystem.checked_owner_fence().await.ok() != Some(route.fence) {
             return Err(RegistryError::InvalidInput);
         }
-        let drive = DriveConfig::new(route.volume.clone(), filesystem.driver(), bearer_token)
+        let drive = DriveConfig::with_tokens(route.volume.clone(), filesystem.driver(), tokens)
             .map_err(|_| RegistryError::InvalidInput)?;
         let mut registry = DriveRegistry::new();
         registry
@@ -175,9 +191,14 @@ impl OwnerHttpHandler {
         if let Some(handler) = &self.sessions
             && handler.matches(request.uri().path())
         {
-            return handler
-                .serve(request, self.session_operations.as_deref())
-                .await;
+            // Through the application, so that a session request another
+            // server forwarded here is in this server's access log and
+            // metrics as a forwarded file request is.
+            let sessions = TimedSessions {
+                handler: handler.clone(),
+                timings: self.session_operations.clone(),
+            };
+            return self.application.handle_observed(&sessions, request).await;
         }
         self.application.handle(request).await
     }
@@ -245,6 +266,7 @@ impl OwnerHttpHandler {
         counters.admission.record_duration(admission);
         request.headers_mut().remove(ROUTE_HEADER);
         request.headers_mut().remove(HOP_HEADER);
+        request.headers_mut().remove(crate::PEER_PROTOCOL_HEADER);
         let body = StreamBody::new(futures_util::stream::try_unfold(
             recv,
             |mut recv| async move {
@@ -351,6 +373,20 @@ impl OwnerHttpHandler {
         Ok(())
     }
 }
+/// The session routes of one owner, with its operation timers.
+struct TimedSessions {
+    handler: Arc<SessionHttpHandler>,
+    timings: Option<Arc<SessionOperationCounters>>,
+}
+impl mount_rs_http::HttpRequestHandler for TimedSessions {
+    fn handle(
+        &self,
+        request: Request<mount_rs_http::HttpBody>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Response<mount_rs_http::HttpBody>> + Send + '_>>
+    {
+        Box::pin(self.handler.serve(request, self.timings.as_deref()))
+    }
+}
 fn request_route(request: &Request<()>) -> Option<VolumeRoute> {
     let header = request.headers().get(ROUTE_HEADER)?.to_str().ok()?;
     if header.len() > 4096 {
@@ -359,13 +395,53 @@ fn request_route(request: &Request<()>) -> Option<VolumeRoute> {
     serde_json::from_str(header).ok()
 }
 
+/// Refuse, before anything else is read, a forwarded request written in a
+/// peer protocol version this server does not speak: the stream is
+/// answered and `Err` returns that answer's future. Otherwise the stream
+/// comes back untouched.
+fn admit_protocol(
+    identity: &TlsIdentity,
+    request: &Request<()>,
+    mut stream: PeerServerStream,
+    observer: Option<&crate::PeerProtocolObserver>,
+) -> Result<PeerServerStream, PeerHandlerFuture> {
+    let Err(offered) = crate::peer_protocol::request_version(request.headers()) else {
+        return Ok(stream);
+    };
+    if let Some(observer) = observer {
+        let peer = identity.role_id().to_owned();
+        observer(&crate::PeerProtocolRefusal::Request { peer, offered });
+    }
+    Err(Box::pin(async move {
+        stream
+            .send_response(
+                Response::builder()
+                    .status(StatusCode::UPGRADE_REQUIRED)
+                    .header("x-mount-dispatch", "not-dispatched")
+                    // What to speak instead, for the peer's own log.
+                    .header(
+                        crate::PEER_PROTOCOL_HEADER,
+                        crate::PeerProtocolRange::SUPPORTED.to_string(),
+                    )
+                    .body(())
+                    .unwrap(),
+            )
+            .await?;
+        stream.finish().await
+    }))
+}
+
 impl PeerRequestHandler for OwnerHttpHandler {
     fn handle(
         &self,
-        _identity: TlsIdentity,
+        identity: TlsIdentity,
         request: Request<()>,
         stream: PeerServerStream,
     ) -> PeerHandlerFuture {
+        let stream = match admit_protocol(&identity, &request, stream, None) {
+            Ok(stream) => stream,
+            Err(refused) => return refused,
+        };
         let handler = self.clone();
         Box::pin(async move {
             let route = request_route(&request);
@@ -399,6 +475,7 @@ impl Drop for CancelSend {
 #[derive(Clone)]
 pub struct OwnerHttpRouter {
     owners: Arc<arc_swap::ArcSwap<Owners>>,
+    protocol_observer: Option<crate::PeerProtocolObserver>,
 }
 type Owners = std::collections::BTreeMap<String, Arc<OwnerHttpHandler>>;
 const MAX_OWNED_VOLUMES: usize = 4096;
@@ -418,7 +495,14 @@ impl OwnerHttpRouter {
         }
         Ok(Self {
             owners: Arc::new(arc_swap::ArcSwap::from_pointee(map)),
+            protocol_observer: None,
         })
+    }
+    /// Tell `observer` of every forwarded request refused because it is
+    /// written in a peer protocol version this server does not speak.
+    pub fn with_peer_protocol_observer(mut self, observer: crate::PeerProtocolObserver) -> Self {
+        self.protocol_observer = Some(observer);
+        self
     }
     /// Start serving `owner`'s volume. Refused if the volume is already
     /// served here: remove and close the old handler first.
@@ -499,7 +583,7 @@ impl OwnerHttpRouter {
         self.owners.load().get(volume).cloned()
     }
     /// Every drive served here now, as one registry.
-    pub(crate) fn drives(&self) -> DriveRegistry {
+    pub fn drives(&self) -> DriveRegistry {
         let mut drives = DriveRegistry::new();
         for owner in self.owners.load().values() {
             // Volume names are the keys of the map, so none repeats.
@@ -511,10 +595,15 @@ impl OwnerHttpRouter {
 impl PeerRequestHandler for OwnerHttpRouter {
     fn handle(
         &self,
-        _identity: TlsIdentity,
+        identity: TlsIdentity,
         request: Request<()>,
-        mut stream: PeerServerStream,
+        stream: PeerServerStream,
     ) -> PeerHandlerFuture {
+        let mut stream =
+            match admit_protocol(&identity, &request, stream, self.protocol_observer.as_ref()) {
+                Ok(stream) => stream,
+                Err(refused) => return refused,
+            };
         let route = request_route(&request);
         if let Some(owner) = route.as_ref().and_then(|r| self.local(&r.volume)) {
             return Box::pin(async move { owner.serve(request, stream, route).await });
@@ -586,6 +675,7 @@ mod session_tests {
             fence: fs.checked_owner_fence().await.unwrap(),
             address: "127.0.0.1:9999".parse().unwrap(),
             tls_server_name: "owner.test".into(),
+            protocols: crate::PeerProtocolRange::SUPPORTED,
         };
         let token = "a".repeat(32);
         let handler =

@@ -1403,6 +1403,7 @@ async fn worker(path: &Path, client_runtime: Option<&tokio::runtime::Handle>) ->
             fence: fs.checked_owner_fence().await?,
             address: own_address,
             tls_server_name: "localhost".into(),
+            protocols: mount_rs_cluster::PeerProtocolRange::SUPPORTED,
         };
         let registration = Arc::new(
             OwnedVolumeRegistration::new(

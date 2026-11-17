@@ -80,6 +80,12 @@ mod handles;
 mod join_slot;
 pub use handles::OwnedHandleSession;
 
+mod peer_protocol;
+pub use peer_protocol::{
+    MIN_PEER_PROTOCOL_VERSION, PEER_PROTOCOL_HEADER, PEER_PROTOCOL_VERSION, PeerProtocolObserver,
+    PeerProtocolRange, PeerProtocolRefusal,
+};
+
 mod owner;
 pub use owner::{
     OwnedVolumeRegistration, RegistrationError, RegistrationRecovery, RegistrationStatus,
@@ -99,6 +105,11 @@ pub struct VolumeRoute {
     pub address: SocketAddr,
     /// Must be authenticated against configured membership, not trusted from Redis.
     pub tls_server_name: String,
+    /// The peer protocol versions this owner accepts. Version 1 alone is
+    /// not written, so a record from a version 1 owner is the record every
+    /// earlier release wrote and reads.
+    #[serde(default, skip_serializing_if = "PeerProtocolRange::is_v1")]
+    pub protocols: PeerProtocolRange,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,6 +265,7 @@ impl VolumeRoute {
         .all(|s| identifier(s))
             || self.fence == 0
             || self.address.port() == 0
+            || !self.protocols.valid()
         {
             return Err(RegistryError::InvalidInput);
         }
@@ -542,6 +554,7 @@ mod tests {
             fence,
             address: "127.0.0.1:4443".parse().unwrap(),
             tls_server_name: "node.example".into(),
+            protocols: crate::PeerProtocolRange::SUPPORTED,
         }
     }
     #[test]
@@ -551,6 +564,48 @@ mod tests {
         let mut invalid = route(1);
         invalid.volume = "bad:key".into();
         assert!(invalid.encode().is_err());
+    }
+    /// The record a version 1 owner publishes is, byte for byte, the record
+    /// of the releases before the protocol marker, which refuse a record
+    /// with a field they do not know. A later range is written, read back,
+    /// and refused in any other spelling.
+    #[test]
+    fn a_version_one_record_is_the_record_earlier_releases_wrote() {
+        let before_the_marker = "00000000000000000007|{\"volume\":\"volume\",\"node\":\"node\",\
+            \"boot\":\"boot-7\",\"registration\":\"registration-7\",\"fence\":7,\
+            \"address\":\"127.0.0.1:4443\",\"tls_server_name\":\"node.example\"}";
+        assert_eq!(PeerProtocolRange::SUPPORTED, PeerProtocolRange::V1);
+        assert_eq!(route(7).encode().unwrap(), before_the_marker);
+        let decoded: VolumeRoute = serde_json::from_str(&before_the_marker[21..]).unwrap();
+        assert_eq!(decoded, route(7));
+        assert_eq!(decoded.protocols, PeerProtocolRange::V1);
+
+        let mut later = route(7);
+        later.protocols = PeerProtocolRange { min: 1, max: 2 };
+        let record = later.encode().unwrap();
+        assert!(record.ends_with(",\"protocols\":{\"min\":1,\"max\":2}}"));
+        let decoded: VolumeRoute = serde_json::from_str(&record[21..]).unwrap();
+        assert_eq!(decoded, later);
+        for invalid in [(0, 1), (2, 1), (0, 0)] {
+            later.protocols = PeerProtocolRange {
+                min: invalid.0,
+                max: invalid.1,
+            };
+            assert!(later.encode().is_err(), "{invalid:?}");
+        }
+        // Nothing beyond the two bounds is read as a range.
+        for unknown in [
+            r#"{"min":1,"max":2,"draft":true}"#,
+            r#"{"min":1}"#,
+            r#"2"#,
+            r#"{"min":-1,"max":2}"#,
+        ] {
+            let json = record[21..].replace(r#"{"min":1,"max":2}"#, unknown);
+            assert!(
+                serde_json::from_str::<VolumeRoute>(&json).is_err(),
+                "{unknown}"
+            );
+        }
     }
     #[cfg(feature = "http3")]
     #[tokio::test]

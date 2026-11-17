@@ -57,7 +57,10 @@ where
 /// One volume this server is a candidate owner of.
 pub struct FailoverDrive {
     pub volume: String,
-    pub bearer_token: String,
+    /// The bearer tokens the volume accepts while it is owned here. The
+    /// set may be replaced while the supervisor runs: each time the volume
+    /// is taken it is served with whatever the set holds then.
+    pub tokens: mount_rs_http::DriveTokens,
     /// Enables remote sessions on the volume while it is owned here.
     pub sessions: Option<SessionCredentials>,
     pub factory: Arc<dyn DriveFactory>,
@@ -506,6 +509,7 @@ impl Worker {
             fence,
             address: self.options.address,
             tls_server_name: self.options.tls_server_name.clone(),
+            protocols: crate::PeerProtocolRange::SUPPORTED,
         };
         let registration = OwnedVolumeRegistration::new(
             filesystem.clone(),
@@ -515,10 +519,10 @@ impl Worker {
         )
         .await
         .map_err(|error| failed(&format!("route registration: {error:?}")))?;
-        let mut handler = OwnerHttpHandler::new(
+        let mut handler = OwnerHttpHandler::with_tokens(
             filesystem.clone(),
             route,
-            self.drive.bearer_token.clone(),
+            self.drive.tokens.clone(),
             self.options.http.clone(),
         )
         .await

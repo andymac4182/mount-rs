@@ -251,8 +251,7 @@ sends the provider's schema statements (`CREATE TABLE IF NOT EXISTS` and six
 `ALTER TABLE ... IF NOT EXISTS`), an `INSERT ... ON DUPLICATE KEY UPDATE`
 that changes nothing, and then reads the lease row `FOR UPDATE` in a
 pessimistic transaction, which it rolls back on finding the lease held. So
-an attempt is not read-only, but it rewrites nothing: unlike SQLite there is
-no document to fold. While the standbys above retried, TiDB ran no schema
+an attempt is not read-only, but it rewrites nothing. While the standbys above retried, TiDB ran no schema
 job (the last job id was the same before and after), and their open files
 stayed level. `crates/mount-rs-cluster/tests/failover.rs` opens a volume as
 fast as it can while the owner writes to it: 626 attempts in 30 s (641 in a
@@ -437,14 +436,20 @@ long.
   drive (it is retaken once the forged record is gone). Restrict the
   namespace as the README describes.
 - **Stale reads under clock skew** beyond the 5 s renewal margin; see Clocks.
-- **A standby's attempt on SQLite metadata is not read-only.** Opening a
-  SQLite metadata store folds the pending namespace change rows into the
-  stored document before the lease is tried. The namespace is unchanged and
-  the owner carries on (tested with 1700 attempts against an owner writing
-  throughout), but each attempt while the lease is held, at most one every
-  `5P` and only while no route is published, costs one rewrite of the whole
-  document. Trying the lease before folding would avoid it and is left for
-  the SQLite provider. A TiDB attempt folds nothing; see TiDB metadata.
+- **A standby's attempt on SQLite metadata takes the write lock but writes
+  nothing.** Opening the metadata store checks the schema and tries the
+  lease in `BEGIN IMMEDIATE` transactions, so an attempt waits for, and
+  briefly excludes, the owner's commits. It commits no change: the pending
+  namespace change rows are folded into the stored document only in the
+  transaction that takes the lease, and an attempt that finds it held leaves
+  them, the document and the schema version as they were (the SQLite
+  provider tests this with `PRAGMA data_version`, and
+  `crates/mount-rs-cluster/tests/failover.rs` opens a volume as fast as it
+  can against an owner writing throughout). The exception is a metadata
+  file from an older build, whose first open by this build adds the missing
+  columns and tables whoever opens it. Operations other than opening,
+  loading and publishing still fold, whoever calls them; a standby calls
+  none of them before it holds the lease.
 - **No replay.** Requests in flight on a failed owner are not replayed, and
   sessions and handles do not move.
 - **No faster recovery than the lease.** A standby cannot take a drive

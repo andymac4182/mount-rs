@@ -3,8 +3,8 @@ use crate::forward_trace::{ForwardRequestTrace, Stage};
 use crate::membership::{MembershipChange, MembershipError, PeerMembership};
 use crate::request_class::RequestClass;
 use crate::{
-    HOP_HEADER, ROUTE_HEADER, RedisRouteRegistry, RegistryError, VolumeRoute, identifier,
-    transport::*,
+    HOP_HEADER, PEER_PROTOCOL_HEADER, PeerProtocolObserver, PeerProtocolRange, PeerProtocolRefusal,
+    ROUTE_HEADER, RedisRouteRegistry, RegistryError, VolumeRoute, identifier, transport::*,
 };
 use futures_util::FutureExt;
 use http::{HeaderMap, Request, Response, Uri};
@@ -194,6 +194,9 @@ pub enum ForwardError {
     InvalidRequest,
     RouteUnavailable,
     UntrustedRoute,
+    /// The owner's route record accepts no peer protocol version this
+    /// server speaks. Nothing was sent to it.
+    IncompatiblePeer,
     /// Headers or body might have reached the owner. Never replay a write based
     /// on this error; reconciliation requires a durable operation protocol.
     OutcomeUnknown,
@@ -332,6 +335,9 @@ pub struct ForwardDiagnostics {
     pub ingress_route_untrusted: u64,
     pub background_route_lookups: u64,
     pub peer_not_dispatched_503: u64,
+    /// Requests not sent, or refused unrun by the owner, because the two
+    /// servers share no peer protocol version.
+    pub peer_protocol_refused: u64,
     pub response_receive_errors: u64,
     pub response_length_errors: u64,
     pub upload_completion_errors: u64,
@@ -345,6 +351,7 @@ struct BodyFailures {
     ingress_route_untrusted: AtomicU64,
     background_route_lookups: AtomicU64,
     peer_not_dispatched_503: AtomicU64,
+    peer_protocol_refused: AtomicU64,
     response_receive_errors: AtomicU64,
     response_length_errors: AtomicU64,
     upload_completion_errors: AtomicU64,
@@ -370,6 +377,7 @@ pub struct IngressForwarder {
     routes: Arc<crate::route_cache::RouteCache>,
     route_lookups: Arc<crate::coalesce::Coalesce>,
     body_failures: Arc<BodyFailures>,
+    protocol_observer: Option<PeerProtocolObserver>,
 }
 impl IngressForwarder {
     /// Forward with a membership that stays as given. To change it while
@@ -418,7 +426,23 @@ impl IngressForwarder {
             routes: Arc::default(),
             route_lookups: Arc::default(),
             body_failures: Arc::default(),
+            protocol_observer: None,
         })
+    }
+    /// Tell `observer` of every request this forwarder does not send, or
+    /// has refused unrun, because the owner speaks no peer protocol
+    /// version this server does.
+    pub fn with_peer_protocol_observer(mut self, observer: PeerProtocolObserver) -> Self {
+        self.protocol_observer = Some(observer);
+        self
+    }
+    fn protocol_refused(&self, refusal: PeerProtocolRefusal) {
+        self.body_failures
+            .peer_protocol_refused
+            .fetch_add(1, Ordering::Relaxed);
+        if let Some(observer) = &self.protocol_observer {
+            observer(&refusal);
+        }
     }
     /// Forward over these clients as well, taking them in turn per request.
     ///
@@ -486,6 +510,10 @@ impl IngressForwarder {
             peer_not_dispatched_503: self
                 .body_failures
                 .peer_not_dispatched_503
+                .load(Ordering::Relaxed),
+            peer_protocol_refused: self
+                .body_failures
+                .peer_protocol_refused
                 .load(Ordering::Relaxed),
             response_receive_errors: self
                 .body_failures
@@ -703,6 +731,18 @@ impl IngressForwarder {
             .peers
             .route_pin(route)
             .ok_or(ForwardError::UntrustedRoute)?;
+        // The owner states which protocol versions it accepts. With none in
+        // common, a request written in this server's would be misread: send
+        // nothing. The route stays cached for its short lifetime; a newer
+        // record replaces it as any other would.
+        let Some(protocol) = PeerProtocolRange::SUPPORTED.common(&route.protocols) else {
+            self.protocol_refused(PeerProtocolRefusal::Route {
+                volume: route.volume.clone(),
+                owner: route.node.clone(),
+                accepts: route.protocols,
+            });
+            return Err(ForwardError::IncompatiblePeer);
+        };
         let (mut parts, mut body) = request.into_parts();
         strip_connection_headers(&mut parts.headers);
         parts.headers.remove("host");
@@ -719,6 +759,10 @@ impl IngressForwarder {
         parts
             .headers
             .insert(HOP_HEADER, http::HeaderValue::from_static("1"));
+        // Replaces whatever a public client put under this name.
+        parts
+            .headers
+            .insert(PEER_PROTOCOL_HEADER, http::HeaderValue::from(protocol));
         let path_query = parts
             .uri
             .path_and_query()
@@ -872,6 +916,11 @@ impl IngressForwarder {
                 self.body_failures
                     .peer_not_dispatched_503
                     .fetch_add(1, Ordering::Relaxed);
+            } else if parts.status == http::StatusCode::UPGRADE_REQUIRED {
+                self.protocol_refused(PeerProtocolRefusal::Refused {
+                    volume: route.volume.clone(),
+                    owner: route.node.clone(),
+                });
             }
             self.invalidate(route).await;
         } else if self.options.renew_route_on_success && parts.status.is_success() {
@@ -896,6 +945,7 @@ impl IngressForwarder {
         strip_connection_headers(&mut parts.headers);
         parts.headers.remove(ROUTE_HEADER);
         parts.headers.remove(HOP_HEADER);
+        parts.headers.remove(PEER_PROTOCOL_HEADER);
         if parts.status == http::StatusCode::NO_CONTENT {
             // The peer hop states the length of every response. A 204 must
             // not carry one, and the owner's own listener sends none.
@@ -1225,6 +1275,10 @@ impl mount_rs_http::HttpRequestHandler for IngressForwarder {
                             counter.fetch_add(1, Ordering::Relaxed);
                             (http::StatusCode::SERVICE_UNAVAILABLE, "not-dispatched")
                         }
+                        // Counted and reported where it was decided.
+                        ForwardError::IncompatiblePeer => {
+                            (http::StatusCode::SERVICE_UNAVAILABLE, "not-dispatched")
+                        }
                         ForwardError::OutcomeUnknown => (http::StatusCode::BAD_GATEWAY, "unknown"),
                     };
                     cluster_response(status, certainty)
@@ -1532,6 +1586,7 @@ mod route_lookup_tests {
             fence: 1,
             address: peer.address,
             tls_server_name: peer.tls_server_name.clone(),
+            protocols: crate::PeerProtocolRange::SUPPORTED,
         };
         let lookups = Arc::new(AtomicUsize::new(0));
         let (answer, held) = tokio::sync::watch::channel(false);
