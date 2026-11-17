@@ -906,8 +906,24 @@ fn fold_namespace_changes(connection: &Connection) -> Result<()> {
     if !pending {
         return Ok(());
     }
-    in_savepoint(connection, || {
+    // Folding reads the rows and then replaces them. Outside a transaction,
+    // take the write lock before reading: a connection that has read and
+    // then asks to write while another is waiting to commit is refused at
+    // once ("database is locked") rather than after the busy timeout, so a
+    // second process opening a store that its owner is writing to would
+    // fail to open it instead of finding the writer lease held.
+    let outermost = connection.is_autocommit();
+    if outermost {
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(backend_error)?;
+    }
+    let folded = in_savepoint(connection, || {
         let stored = StoredNamespace::read(connection, None)?;
+        if stored.rows.is_empty() {
+            // Another process folded them since the check above.
+            return Ok(());
+        }
         let (namespace, _) = stored.decode()?.ok_or_else(|| {
             incompatible_schema("namespace change rows without a stored namespace")
         })?;
@@ -925,7 +941,13 @@ fn fold_namespace_changes(connection: &Connection) -> Result<()> {
             return Err(incompatible_schema("the metadata row is missing"));
         }
         Ok(())
-    })
+    });
+    if outermost {
+        let finish = if folded.is_ok() { "COMMIT" } else { "ROLLBACK" };
+        let finished = connection.execute_batch(finish).map_err(backend_error);
+        return folded.and(finished);
+    }
+    folded
 }
 const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_blocks (
  id TEXT PRIMARY KEY NOT NULL, bytes BLOB NOT NULL);
@@ -1203,6 +1225,13 @@ fn initialize_version_schema_on(database: &Database, connection: &mut Connection
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(backend_error)?;
+    if database.namespace_changes {
+        // The caller folded before this transaction began, and a live
+        // writer may have published a change row since. A row raises the
+        // schema version past what the check below accepts, so fold again
+        // now that nothing else can write.
+        fold_namespace_changes(&tx)?;
+    }
 
     let schema_columns = table_columns(&tx, SCHEMA_VERSION_TABLE)?;
     if let Some(columns) = schema_columns {
