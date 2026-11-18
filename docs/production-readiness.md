@@ -187,6 +187,9 @@ CI on Linux, durable topology, by manual dispatch of the CI workflow
 | `tidb-rustfs` | `031050cc` | Pass: `TIDB_CHUNKED_RUSTFS_REOPEN_PASS`, `RUSTFS_COMBO_PASS`, four `TIDB_SQLITE_HOSTING_PASS`, `TIDB_FAILOVER_PASS`, `TIDB_STANDBY_OPEN_CONTENTION attempts=1866 owner_writes=5873` | [44141640175 / 134245706570](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706570) |
 | `tidb-tls-compile` | `031050cc` | Pass | [44141640175 / 134245706338](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706338) |
 | `ozone-tidb` | `031050cc` | Pass: 3,738 IOPS against the 1,000 target | [44141640175 / 134245706208](https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706208) |
+| `tidb` | `e0f956b9` (`main` after #156) | Pass: `TIDB_ACCEPTANCE evidence=durable-multinode-restart`; the autocommit conflict tests, with `ERROR 1213` in each of three deadlock rounds | [44206434960 / 134499868948](https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499868948) |
+| `tidb-tls`, `tidb-tls-compile`, `tidb-rustfs` | `e0f956b9` | Pass | [44206434960](https://github.com/andymac4182/mount-rs/actions/runs/44206434960) |
+| `ozone-tidb` | `e0f956b9` | Pass: 3,624 IOPS against the 1,000 target | [44206434960 / 134499894374](https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499894374) |
 
 Run 44141640175 was a manual dispatch on `main`. The push run for the next
 commit, `d69d11f0`
