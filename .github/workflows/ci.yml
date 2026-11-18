@@ -1228,7 +1228,9 @@ jobs:
           if-no-files-found: error
 
   node:
-    timeout-minutes: 45
+    # The macOS Intel leg has taken 26 to more than 45 minutes on main with
+    # every step passing; its builds are the slow part.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
