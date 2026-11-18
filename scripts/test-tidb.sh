@@ -118,6 +118,32 @@ if [ "${MOUNT_RS_TIDB_TRACE:-0}" = "1" ]; then
     exit 2
   fi
 fi
+gc_life_time_only=0
+case "${MOUNT_RS_TIDB_GC_LIFE_TIME_ONLY:-0}" in
+  0) ;;
+  1)
+    # Run only the GC life time test, on a TiDB nothing else uses: it changes
+    # GLOBAL GC settings for about 22 minutes.
+    gc_life_time_only=1
+    ;;
+  *)
+    echo "test-tidb.sh: MOUNT_RS_TIDB_GC_LIFE_TIME_ONLY must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+run_crash=0
+case "${MOUNT_RS_TIDB_CRASH:-0}" in
+  0) ;;
+  1) run_crash=1 ;;
+  *)
+    echo "test-tidb.sh: MOUNT_RS_TIDB_CRASH must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+if [ "$gc_life_time_only" -eq 1 ] && [ "$run_crash" -eq 1 ]; then
+  echo "test-tidb.sh: MOUNT_RS_TIDB_GC_LIFE_TIME_ONLY=1 runs nothing else; unset MOUNT_RS_TIDB_CRASH" >&2
+  exit 2
+fi
 run_failover=0
 if [ "${MOUNT_RS_TIDB_FAILOVER:-0}" = "1" ]; then
   # serve-http drive failover with the writer lease in this TiDB. The
@@ -880,15 +906,163 @@ run_conflict_classification_test() {
 }
 
 run_gc_life_time_test() {
-  # Opt-in: about 22 minutes, because TiDB accepts no GC life time below ten
-  # minutes. No CI job sets this, so the provider reports error 9006 from an
-  # autocommit statement as an unknown outcome.
-  if [ "${MOUNT_RS_TIDB_GC_LIFE_TIME_TEST:-0}" != 1 ]; then
+  # About 22 minutes, because TiDB accepts no GC life time below ten minutes.
+  # It lowers GLOBAL GC settings while it runs, so it needs a TiDB of its own:
+  # the CI job tidb-gc-life-time runs it alone with
+  # MOUNT_RS_TIDB_GC_LIFE_TIME_ONLY=1. The test fails, rather than skips, if
+  # the statement does not end with error 9006.
+  if [ "${MOUNT_RS_TIDB_GC_LIFE_TIME_TEST:-0}" != 1 ] && [ "$gc_life_time_only" -ne 1 ]; then
     return 0
   fi
   phase_name="GC life time test"
   echo "TiDB phase=$phase_name" >&2
+  gc_started=$(date +%s)
   run_exact_provider_lib_test actual_tidb_gc_life_time_error_is_an_unknown_autocommit_outcome
+  if ! grep -q 'TIDB_CONFLICT .*case=gc_life_time .*9006' \
+    "$run_dir/actual_tidb_gc_life_time_error_is_an_unknown_autocommit_outcome.log"; then
+    echo "test-tidb.sh: the GC life time test passed without reporting error 9006" >&2
+    return 1
+  fi
+  echo "TIDB_GC_LIFE_TIME_PASS code=9006 classification=unknown-outcome committed=false elapsed_seconds=$(($(date +%s) - gc_started)) version=$image_version" >&2
+}
+
+# Kill every PD, TiKV and TiDB process at once with SIGKILL while a writer is
+# publishing, start them all again, and check what survived. This is a
+# process crash of the whole cluster, not a power loss: the page cache and
+# the disks are untouched, so it says nothing about data a component had
+# written but not yet fsynced.
+run_crash_test() {
+  if [ "$run_crash" -ne 1 ]; then
+    return 0
+  fi
+  phase_name="simultaneous SIGKILL of every TiDB component"
+  echo "TiDB phase=$phase_name" >&2
+  crash_dir="$run_dir/crash"
+  mkdir "$crash_dir"
+  crash_volume_key="mount-rs-tidb-crash-$run_id"
+  crash_writer_log="$run_dir/crash-writer.log"
+  # Build first, so compilation does not eat into the writer's deadline.
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test crash_restart --no-run
+  set +e
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TIDB_CRASH_DIR="$crash_dir" \
+  MOUNT_RS_TIDB_CRASH_VOLUME_KEY="$crash_volume_key" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test crash_restart \
+      actual_tidb_crash_writer_publishes_until_the_cluster_is_killed \
+      -- --ignored --exact --nocapture --test-threads=1 >"$crash_writer_log" 2>&1 &
+  crash_writer_pid=$!
+  set -e
+  crash_deadline=$(($(date +%s) + startup_timeout_seconds))
+  while [ ! -e "$crash_dir/ready" ]; do
+    if ! kill -0 "$crash_writer_pid" 2>/dev/null; then
+      cat "$crash_writer_log" >&2
+      echo "test-tidb.sh: the crash writer exited before it was ready" >&2
+      return 1
+    fi
+    if [ "$(date +%s)" -ge "$crash_deadline" ]; then
+      kill "$crash_writer_pid" 2>/dev/null || true
+      cat "$crash_writer_log" >&2
+      echo "test-tidb.sh: the crash writer was not ready in ${startup_timeout_seconds}s" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  crash_containers=""
+  pd_number=1
+  while [ "$pd_number" -le "$pd_count" ]; do
+    crash_containers="$crash_containers mount-rs-tidb-$run_id-pd$pd_number"
+    pd_number=$((pd_number + 1))
+  done
+  tikv_number=1
+  while [ "$tikv_number" -le "$tikv_count" ]; do
+    crash_containers="$crash_containers mount-rs-tidb-$run_id-tikv$tikv_number"
+    tikv_number=$((tikv_number + 1))
+  done
+  crash_containers="$crash_containers $tidb_container"
+  # One docker kill call signals every container; the daemon sends SIGKILL to
+  # each without waiting for another to stop first.
+  docker kill --signal KILL $crash_containers >/dev/null
+  crash_killed=0
+  for container in $crash_containers; do
+    crash_state=$(docker inspect --format '{{.State.Status}}' "$container")
+    if [ "$crash_state" = running ]; then
+      echo "test-tidb.sh: $container still running after SIGKILL" >&2
+      return 1
+    fi
+    crash_killed=$((crash_killed + 1))
+  done
+  echo "TiDB crash killed=$crash_killed signal=KILL" >&2
+  set +e
+  wait "$crash_writer_pid"
+  crash_writer_status=$?
+  set -e
+  cat "$crash_writer_log" >&2
+  if [ "$crash_writer_status" -ne 0 ]; then
+    echo "test-tidb.sh: the crash writer failed (status $crash_writer_status)" >&2
+    return "$crash_writer_status"
+  fi
+  if ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored' "$crash_writer_log"; then
+    echo "test-tidb.sh: the crash writer did not run" >&2
+    return 1
+  fi
+
+  begin_phase "restart after simultaneous SIGKILL"
+  pd_number=1
+  while [ "$pd_number" -le "$pd_count" ]; do
+    docker start "mount-rs-tidb-$run_id-pd$pd_number" >/dev/null
+    pd_number=$((pd_number + 1))
+  done
+  pd_number=1
+  while [ "$pd_number" -le "$pd_count" ]; do
+    wait_for_pd "mount-rs-tidb-$run_id-pd$pd_number" "PD$pd_number after SIGKILL"
+    pd_number=$((pd_number + 1))
+  done
+  wait_for_pd_quorum
+  tikv_number=1
+  while [ "$tikv_number" -le "$tikv_count" ]; do
+    docker start "mount-rs-tidb-$run_id-tikv$tikv_number" >/dev/null
+    tikv_number=$((tikv_number + 1))
+  done
+  tikv_number=1
+  while [ "$tikv_number" -le "$tikv_count" ]; do
+    wait_for_tikv "mount-rs-tidb-$run_id-tikv$tikv_number" "TiKV$tikv_number after SIGKILL"
+    tikv_number=$((tikv_number + 1))
+  done
+  wait_for_store_count
+  # TiDB keeps no state of its own. A fresh container, as in the ordered
+  # restart, gets a fresh published port and listener.
+  docker rm "$tidb_container" >/dev/null
+  start_tidb "$tidb_container"
+  tidb_url="mysql://root@127.0.0.1:$tidb_sql_port/test"
+  wait_for_tidb
+
+  phase_name="verification after simultaneous SIGKILL"
+  echo "TiDB phase=$phase_name" >&2
+  crash_verify_log="$run_dir/crash-verify.log"
+  set +e
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TIDB_CRASH_DIR="$crash_dir" \
+  MOUNT_RS_TIDB_CRASH_VOLUME_KEY="$crash_volume_key" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test crash_restart \
+      actual_tidb_crash_survivors_match_the_acknowledged_publications \
+      -- --ignored --exact --nocapture --test-threads=1 >"$crash_verify_log" 2>&1
+  crash_verify_status=$?
+  set -e
+  cat "$crash_verify_log" >&2
+  if [ "$crash_verify_status" -ne 0 ]; then
+    return "$crash_verify_status"
+  fi
+  if ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored' "$crash_verify_log"; then
+    echo "test-tidb.sh: the crash verification did not run" >&2
+    return 1
+  fi
+  crash_summary=$(grep 'TIDB_CRASH_VERIFIED ' "$crash_verify_log" | tail -n 1 | sed 's/.*TIDB_CRASH_VERIFIED //')
+  if [ -z "$crash_summary" ]; then
+    echo "test-tidb.sh: the crash verification printed no summary" >&2
+    return 1
+  fi
+  crash_result=pass
+  echo "TIDB_CRASH_RESTART_PASS topology=$topology pd=$pd_count tikv=$tikv_count tidb=1 signal=KILL $crash_summary" >&2
 }
 
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2
@@ -960,6 +1134,12 @@ wait_for_tidb
 tidb_url="mysql://root@127.0.0.1:$tidb_sql_port/test"
 volume_key="mount-rs-tidb-$run_id"
 
+crash_result=not-run
+if [ "$gc_life_time_only" -eq 1 ]; then
+  run_gc_life_time_test
+  exit 0
+fi
+
 set +e
 run_provider_test 0
 provider_status=$?
@@ -991,6 +1171,9 @@ if [ "$topology" = durable ]; then
   wait_for_pd "$pd1_container" "PD1 after restart"
   wait_for_pd_quorum
   wait_for_tidb
+  # Then kill every component at once. The persisted phase below also checks
+  # that what the first phase wrote survived that.
+  run_crash_test
   set +e
   run_provider_test 1
   provider_status=$?
@@ -1000,6 +1183,10 @@ if [ "$topology" = durable ]; then
   fi
 fi
 
+if [ "$topology" != durable ]; then
+  # The single-node topology has no ordered restarts; crash it here.
+  run_crash_test
+fi
 run_consumer_tests
 run_failover_tests
 run_trace_test
@@ -1021,4 +1208,4 @@ elif [ "$topology" = durable ]; then
 else
   evidence_class="single-node-smoke-not-replicated-acceptance"
 fi
-echo "TIDB_ACCEPTANCE evidence=$evidence_class topology=$topology version=$image_version platform=$docker_platform cpus=$docker_cpu_count mem_bytes=$docker_mem_bytes ambiguous_commit=pass" >&2
+echo "TIDB_ACCEPTANCE evidence=$evidence_class topology=$topology version=$image_version platform=$docker_platform cpus=$docker_cpu_count mem_bytes=$docker_mem_bytes ambiguous_commit=pass crash_restart=$crash_result" >&2

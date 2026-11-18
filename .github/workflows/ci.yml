@@ -481,7 +481,41 @@ jobs:
           # Compare TiDB with the pinned mountx oracle over the seeded traces.
           MOUNT_RS_TIDB_TRACE: '1'
           MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source
-        run: ./scripts/test-tidb.sh
+          # SIGKILL every PD, TiKV and TiDB at once while a writer publishes,
+          # restart them, and check what survived; see run_crash_test.
+          MOUNT_RS_TIDB_CRASH: '1'
+        run: |
+          set -o pipefail
+          ./scripts/test-tidb.sh 2>&1 | tee "$RUNNER_TEMP/tidb.log"
+          grep -q '^TIDB_CRASH_RESTART_PASS topology=durable ' "$RUNNER_TEMP/tidb.log"
+
+  tidb-gc-life-time:
+    # Error 9006 ("GC life time is shorter than transaction duration") for an
+    # autocommit statement. TiDB accepts no GC life time below ten minutes,
+    # so the test needs about 22 minutes, and it lowers GLOBAL GC settings
+    # while it runs: it gets a single-node TiDB of its own and nothing else
+    # runs there. It fails, not skips, if the statement does not end in 9006.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Build the provider tests before the timed harness
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-gc-cargo-target
+        run: cargo test --locked -p mount-rs-tidb --lib --no-run
+      - name: Provoke error 9006 for an autocommit statement
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-gc-cargo-target
+          MOUNT_RS_TIDB_TOPOLOGY: single
+          MOUNT_RS_TIDB_GC_LIFE_TIME_ONLY: '1'
+        run: |
+          set -o pipefail
+          ./scripts/test-tidb.sh 2>&1 | tee "$RUNNER_TEMP/tidb-gc-life-time.log"
+          grep -q '^TIDB_GC_LIFE_TIME_PASS code=9006 ' "$RUNNER_TEMP/tidb-gc-life-time.log"
 
   tidb-tls-compile:
     # This verifies that every public TiDB consumer can ship the TLS-capable
@@ -611,7 +645,10 @@ jobs:
       - name: Build the mounted SQLite-hosting test before the timed harness
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
-        run: cargo test --locked -p mount-rs-core --test native_tidb_sqlite --no-run
+        run: |
+          cargo test --locked -p mount-rs-core --test native_tidb_sqlite --no-run
+          cargo test --locked -p mount-rs-cli --test native_tidb_sqlite_crash --no-run
+          cargo test --locked -p mount-rs-tidb --test crash_restart --no-run
       - name: Build the drive failover tests before the timed harness
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
@@ -638,8 +675,15 @@ jobs:
           # and RustFS, after the restart checks; see run_failover_tests.
           MOUNT_RS_TIDB_FAILOVER: '1'
           MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+          # SIGKILL every TiDB component at once under a writer; and, in the
+          # consumer phase, SIGKILL the mount-rs process under SQLite.
+          MOUNT_RS_TIDB_CRASH: '1'
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
-        run: ./scripts/test-tidb-rustfs.sh
+        run: |
+          set -o pipefail
+          ./scripts/test-tidb-rustfs.sh 2>&1 | tee "$RUNNER_TEMP/tidb-rustfs.log"
+          grep -q '^TIDB_CRASH_RESTART_PASS topology=durable ' "$RUNNER_TEMP/tidb-rustfs.log"
+          test "$(grep -c 'TIDB_SQLITE_MOUNT_CRASH_PASS ' "$RUNNER_TEMP/tidb-rustfs.log")" = 2
 
   native-webdav:
     strategy:
