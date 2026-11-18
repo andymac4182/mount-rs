@@ -230,6 +230,8 @@ CI on Linux, durable topology, by manual dispatch of the CI workflow
 | `tidb-rustfs` | `e6bf1ea7` | Pass: `TIDB_CRASH_RESTART_PASS topology=durable`; two `TIDB_SQLITE_MOUNT_CRASH_PASS` (TiDB blocks and RustFS blocks), each with 8 committed transactions per database, the kill inside `BEGIN DELETE 9`, `integrity=ok`, and 15 and 14 refused remounts before the lease expired | [44252877749 / 134628775110](https://github.com/andymac4182/mount-rs/actions/runs/44252877749/job/134628775110) |
 | `tidb-gc-life-time` | `e6bf1ea7` | Pass: `TIDB_GC_LIFE_TIME_PASS code=9006 classification=unknown-outcome committed=false elapsed_seconds=1320`; the job took 24 min 22 s | [44252877749 / 134628774351](https://github.com/andymac4182/mount-rs/actions/runs/44252877749/job/134628774351) |
 | `tidb-tls`, `ozone-tidb` | `e6bf1ea7` | Pass | [44252877749](https://github.com/andymac4182/mount-rs/actions/runs/44252877749) |
+| `tidb`, `tidb-rustfs`, `tidb-tls`, `tidb-tls-compile`, `tidb-gc-life-time` | `e0ee93a0` (`main` after #162) | Pass, every job of the run on its first attempt | [44270883958](https://github.com/andymac4182/mount-rs/actions/runs/44270883958) |
+| `ozone-tidb` | `e0ee93a0` | Pass: 4,332 IOPS against the 1,000 target | [44270883958 / 134686903948](https://github.com/andymac4182/mount-rs/actions/runs/44270883958/job/134686903948) |
 
 Run 44141640175 was a manual dispatch on `main`. The push run for the next
 commit, `d69d11f0`

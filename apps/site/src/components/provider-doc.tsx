@@ -744,8 +744,8 @@ WHERE volume_key = '<owned-volume-key>';`,
     ),
     evidence: (
       <>
-        CI run <code>44206434960</code> on <code>main</code> at source{' '}
-        <code>e0f956b9</code> is the current evidence, on the pinned TiDB
+        CI run <code>44270883958</code> on <code>main</code> at source{' '}
+        <code>e0ee93a0</code> is the current evidence, on the pinned TiDB
         v8.5.7 images. The <code>tidb</code> job ends with{' '}
         <code>TIDB_ACCEPTANCE evidence=durable-multinode-restart</code>: the
         split-store contract, provider-clock fencing, concurrent publication
@@ -761,7 +761,7 @@ WHERE volume_key = '<owned-volume-key>';`,
         with RustFS blocks, hosts SQLite on a FUSE mount before and after the
         restarts, and fails a drive over between two servers with the writer
         lease in TiDB. <code>ozone-tidb</code> composes TiDB metadata with
-        Apache Ozone blocks and measured 3,624 operations a second against
+        Apache Ozone blocks and measured 4,332 operations a second against
         its 1,000 floor; that figure is a gate on shared runners, not a
         capacity number. <code>tidb-gc-life-time</code> provokes error code
         9006 for an autocommit statement on a TiDB of its own and checks
@@ -778,11 +778,11 @@ WHERE volume_key = '<owned-volume-key>';`,
       </>
     ),
     sources: [
-      { label: 'Current CI evidence on main (run 44206434960)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960' },
-      { label: 'Durable restart and trace-parity job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499868948' },
-      { label: 'TLS handshake and refusal job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499885055' },
-      { label: 'TiDB with RustFS blocks, SQLite hosting and failover job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499873098' },
-      { label: 'TiDB with Ozone blocks job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499894374' },
+      { label: 'Current CI evidence on main (run 44270883958)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958' },
+      { label: 'Durable restart and trace-parity job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958/job/134686904104' },
+      { label: 'TLS handshake and refusal job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958/job/134686904134' },
+      { label: 'TiDB with RustFS blocks, SQLite hosting and failover job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958/job/134686904276' },
+      { label: 'TiDB with Ozone blocks job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958/job/134686903948' },
       { label: 'TiDB readiness notes', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/production-readiness.md#tidb-provider' },
       { label: 'Maturity levels', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/maturity.md' },
       { label: 'TiDB provider README', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-tidb/README.md' },
