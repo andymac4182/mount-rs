@@ -426,7 +426,9 @@ nothing to check.
 Ctrl-C starts a graceful shutdown, as does SIGTERM on Unix. On Windows so do
 Ctrl-Break, closing the console window and system shutdown (which is how a
 Windows container is stopped); Windows ends the process about five seconds
-after the last two whether or not the drain has finished, and forced
+after the last two whether or not the drain has finished, so those two stop
+within four seconds: up to two for the drain, the rest for the drives
+(see `docs/serve-http-runbook.md`). Forced
 termination (`taskkill /F`, Task Manager) is never graceful. The listener stops
 accepting, in-flight requests get up to `drain_timeout_ms`, the drives are
 shut down (which releases split-store writer leases), and the process prints

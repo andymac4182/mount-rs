@@ -487,8 +487,10 @@ Limits of `/readyz`, stated plainly:
 
 SIGINT and SIGTERM on Unix start a graceful shutdown. On Windows, Ctrl-C,
 Ctrl-Break, closing the console window and system shutdown do; Windows
-ends the process about 5 seconds after the last two whatever
-`drain_timeout_ms` says, and `taskkill /F` is never graceful. The
+ends the process about 5 seconds after the last two, so they stop within
+4 seconds whatever `drain_timeout_ms` says (see
+[Windows console close and system shutdown](#windows-console-close-and-system-shutdown)),
+and `taskkill /F` is never graceful. The
 platforms each release is tested on are in
 [`support-matrix.md`](support-matrix.md). A graceful shutdown:
 
@@ -542,6 +544,45 @@ seconds for aborted requests to release their file handles, plus
 `drive_shutdown_timeout_ms` (plus up to 2 seconds to flush the access log
 when it is enabled). With the defaults that is 70 seconds. A stop with no
 stalled client and healthy storage does not wait for any of these.
+
+### Windows console close and system shutdown
+
+Windows ends a console process about **5 seconds** after it closes the
+process's console window or shuts the system down, whether or not the
+process has finished. Those two stops therefore do not use the limits
+above. The whole stop gets 4 seconds instead: the drain gets up to 2 of
+them, and the drives get what is left (at least 1 second), each capped by
+`drain_timeout_ms` and `drive_shutdown_timeout_ms` when those are lower.
+The last second is for the process to exit. The console handler does not
+return to Windows until the process exits, which would otherwise let
+Windows end the process at once.
+
+- An idle server stops as after Ctrl-C: `http stopped`, exit code 0, writer
+  lease released.
+- A request still in progress after 2 seconds is abandoned. The process
+  prints `mount-rs: drain cut short after 2000 ms: Windows ends the process
+  about 5 s after a console close or system shutdown`, releases the drives
+  and exits with code 1 at once. An upload that had not finished changes
+  nothing.
+- Drives that need longer than what is left to shut down are left as
+  described above for `drive_shutdown_timeout_ms`; their leases stay held
+  until they expire.
+
+Ctrl-C and Ctrl-Break have no such limit and get the full drain. Stop a
+server that must finish long transfers with one of those. User logoff is
+not a stop.
+
+What is tested: the Windows end-to-end job (`serve-http-e2e (windows-2025)`)
+closes the server's console window the way its close button does, by
+posting `WM_CLOSE` to it, once with the server idle and once with an upload
+stalled half-way under a 60-second drain limit. Both times it checks the
+exit code, that the process exited within 5 seconds of the close, that an
+immediate restart on the same storage starts (so the writer lease was
+released), and that data written before the close is intact. System
+shutdown is not tested: it is only delivered when Windows really shuts
+down. A unit test checks that a shutdown event takes the same path as a
+console close and that logoff is not a stop, so only the delivery of the
+event by Windows is untested.
 
 Operational consequences:
 
