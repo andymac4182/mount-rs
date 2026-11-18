@@ -109,7 +109,7 @@ x86_64; on those two targets only the `mount-rs-cli` tests run, in
 | Platform | Graceful stop | Tested by the end-to-end and smoke tests | Not graceful |
 |----------|---------------|------------------------------------------|--------------|
 | Linux, macOS | `SIGTERM`, `SIGINT` (Ctrl-C) | `SIGTERM`, then `SIGINT` after the restart | `SIGKILL` |
-| Windows | Ctrl-C, Ctrl-Break, closing the console window, system shutdown (how a Windows container is stopped) | Ctrl-C, then Ctrl-Break after the restart, each raised as a console control event on the server's own console | `taskkill /F`, Task Manager "End task", `TerminateProcess` |
+| Windows | Ctrl-C, Ctrl-Break, closing the console window, system shutdown (how a Windows container is stopped) | Ctrl-C, then Ctrl-Break after the restart, each raised as a console control event on the server's own console; then (end-to-end test only) closing the server's console window by posting `WM_CLOSE` to it, idle and with a download the client has stopped reading | `taskkill /F`, Task Manager "End task", `TerminateProcess` |
 
 Windows limits:
 
@@ -118,10 +118,19 @@ Windows limits:
   held until it expires.
 - After the console window is closed or the system shuts down, Windows ends
   the process about five seconds later whether or not the drain has
-  finished. A `drain_timeout_ms` above that is not honoured for those two
-  events.
-- Closing the console window and system shutdown are handled in the code but
-  no workflow triggers them.
+  finished. For those two events the whole stop is fitted into 4 seconds:
+  up to 2 for the drain, the rest for the drives. A request still in
+  progress after 2 seconds is abandoned and the process exits 1 once the
+  drives are released.
+- The end-to-end test on `windows-2025` closes the console window idle
+  (exit 0, `http stopped`) and with a stalled download under a 60-second
+  drain limit (exit 1 by itself, not ended by Windows); both times within
+  5 seconds, with the writer lease released for an immediate restart and
+  earlier data intact. The window is a classic console host (conhost)
+  window; closing a Windows Terminal tab is not tested.
+- System shutdown is not tested: Windows delivers it only when it really
+  shuts down. A unit test checks that it takes the same path as a console
+  close, so only its delivery is untested.
 - User logoff is deliberately not treated as a stop.
 
 ## Features by platform

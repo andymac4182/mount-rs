@@ -487,8 +487,10 @@ Limits of `/readyz`, stated plainly:
 
 SIGINT and SIGTERM on Unix start a graceful shutdown. On Windows, Ctrl-C,
 Ctrl-Break, closing the console window and system shutdown do; Windows
-ends the process about 5 seconds after the last two whatever
-`drain_timeout_ms` says, and `taskkill /F` is never graceful. The
+ends the process about 5 seconds after the last two, so they stop within
+4 seconds whatever `drain_timeout_ms` says (see
+[Windows console close and system shutdown](#windows-console-close-and-system-shutdown)),
+and `taskkill /F` is never graceful. The
 platforms each release is tested on are in
 [`support-matrix.md`](support-matrix.md). A graceful shutdown:
 
@@ -567,6 +569,50 @@ Operational consequences:
   shut down and the process exits with code 1 without printing the readiness
   line.
 
+### Windows console close and system shutdown
+
+Windows ends a console process about **5 seconds** after it closes the
+process's console window or shuts the system down, whether or not the
+process has finished. Those two stops therefore do not use the limits
+above. The whole stop gets 4 seconds instead: the drain gets up to 2 of
+them, and the drives get what is left (at least 1 second), each capped by
+`drain_timeout_ms` and `drive_shutdown_timeout_ms` when those are lower.
+The last second is for the process to exit. The console handler does not
+return to Windows until the process exits, which would otherwise let
+Windows end the process at once.
+
+- An idle server stops as after Ctrl-C: `http stopped`, exit code 0, writer
+  lease released.
+- A request still in progress after 2 seconds (for example a download the
+  client has stopped reading) is abandoned. The process prints
+  `mount-rs: drain cut short after 2000 ms: Windows ends the process about
+  5 s after a console close or system shutdown`, releases the drives and
+  exits with code 1 at once.
+- Drives that need longer than what is left to shut down are left as
+  described above for `drive_shutdown_timeout_ms`; their leases stay held
+  until they expire.
+
+Ctrl-C and Ctrl-Break have no such limit and get the full drain. Stop a
+server that must finish long transfers with one of those. User logoff is
+not a stop.
+
+What is tested: the Windows end-to-end job (`serve-http-e2e (windows-2025)`)
+closes the server's console window the way its close button does, by
+posting `WM_CLOSE` to it, once with the server idle and once with a 64 MiB
+download the client has stopped reading, under a 60-second drain limit.
+Both times it checks the exit code (0, then 1), the server's own message
+(`http stopped`, then `drain cut short`), that the process exited within 5
+seconds of the close, that an immediate restart on the same storage starts
+(so the writer lease was released), and that data written before the close
+is intact. The console is one of the classic console host (conhost): the
+job sets the runner's user to it, because the runner otherwise hands new
+consoles to a pseudo-console terminal whose window ignores `WM_CLOSE`.
+Closing a Windows Terminal tab that runs the server is not tested. System
+shutdown is not tested: Windows delivers it only when it really shuts
+down. A unit test checks that a shutdown event takes the same path as a
+console close and that logoff is not a stop, so only the delivery of the
+event by Windows is untested.
+
 ### systemd unit
 
 ```ini
@@ -585,7 +631,7 @@ LimitNOFILE=65536
 | Code | Meaning | Typical stderr |
 | --- | --- | --- |
 | 0 | Clean stop after a signal. `http stopped` was printed. | |
-| 1 | Runtime failure: missing token variable (`missing environment variable NAME`), drive failed to open (storage unreachable; lease held: `EAGAIN: resource temporarily unavailable, acquire writer`; corrupt block), bind failure (port in use), signal during startup, listener exited unexpectedly, drain deadline exceeded (`HTTP server close timed out`), drive shutdown failed, drive shutdown deadline exceeded (`drive shutdown timed out after N ms: ...`). | `mount-rs: <message>` |
+| 1 | Runtime failure: missing token variable (`missing environment variable NAME`), drive failed to open (storage unreachable; lease held: `EAGAIN: resource temporarily unavailable, acquire writer`; corrupt block), bind failure (port in use), signal during startup, listener exited unexpectedly, drain deadline exceeded (`HTTP server close timed out`), drain cut short after a Windows console close or system shutdown (`drain cut short after 2000 ms: ...`), drive shutdown failed, drive shutdown deadline exceeded (`drive shutdown timed out after N ms: ...`). | `mount-rs: <message>` |
 | 2 | Usage or configuration error: bad arguments, invalid or unknown config key, non-loopback host, invalid drive id, token with whitespace, config without an `http` section. | `mount-rs: <message>` then `try --help` |
 
 Error messages go to stderr with the prefix `mount-rs: `. Secrets in messages

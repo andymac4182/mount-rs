@@ -997,7 +997,9 @@ jobs:
     # binary is exercised end to end where it ships: auth, paths, limits,
     # concurrency, restart, the single-writer lease, and a graceful stop
     # asked for the way that platform's operator asks (SIGTERM and SIGINT on
-    # Unix; Ctrl-C and Ctrl-Break console events on Windows).
+    # Unix; Ctrl-C and Ctrl-Break console events on Windows, and on Windows
+    # also closing the server's console window, which must stop it within
+    # the 5 s Windows allows).
     #
     # The two-node cluster test stays in serve-http-e2e, on Linux only: it
     # needs a Redis service, and GitHub runs service containers only on

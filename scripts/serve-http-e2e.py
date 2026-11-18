@@ -11,7 +11,11 @@ workflow runs it against each packaged binary.
 
 Graceful shutdown is asked for the way an operator on that platform would:
 SIGTERM and then SIGINT on Unix; Ctrl-C and then Ctrl-Break on Windows,
-delivered as console control events to the server's own console.
+delivered as console control events to the server's own console. On Windows
+the full run also closes the server's console window, which is what clicking
+its close button does: the server must release its drive within the five
+seconds Windows allows after a console close, both when idle and when a
+request that would hold the drain open for much longer is in flight.
 """
 import concurrent.futures as cf
 import hashlib
@@ -20,6 +24,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -47,7 +52,7 @@ def check(name, ok, detail=""):
         failures.append(name)
 
 
-def write_config():
+def write_config(name="http.json", timeout_ms=5000, upload=UPLOAD):
     os.makedirs(os.path.join(WORK, "state"), exist_ok=True)
     cfg = {
         "version": 1,
@@ -55,10 +60,10 @@ def write_config():
             "host": "127.0.0.1",
             "port": 0,
             "max_request_bytes": CAP,
-            "max_upload_bytes": UPLOAD,
+            "max_upload_bytes": upload,
             "max_directory_entries": ENTRIES,
-            "request_timeout_ms": 5000,
-            "drain_timeout_ms": 5000,
+            "request_timeout_ms": timeout_ms,
+            "drain_timeout_ms": timeout_ms,
             "drives": [
                 {
                     "id": "files",
@@ -76,7 +81,7 @@ def write_config():
             ],
         },
     }
-    path = os.path.join(WORK, "http.json")
+    path = os.path.join(WORK, name)
     with open(path, "w") as f:
         json.dump(cfg, f)
     return path
@@ -107,8 +112,10 @@ def start(config):
     if not m:
         print(proc.stderr.read(), file=sys.stderr)
         raise SystemExit(f"no readiness line: {line!r}")
-    threading.Thread(target=proc.stdout.read, daemon=True).start()
-    threading.Thread(target=proc.stderr.read, daemon=True).start()
+    # Kept, so a check can look for what the server said as it stopped.
+    proc.out, proc.err = [line], []
+    for stream, lines in ((proc.stdout, proc.out), (proc.stderr, proc.err)):
+        threading.Thread(target=lines.extend, args=(stream,), daemon=True).start()
     return proc, int(m.group(1))
 
 
@@ -153,6 +160,177 @@ def request_stop(proc, second=False):
         return "Ctrl-Break" if second else "Ctrl-C"
     proc.send_signal(signal.SIGINT if second else signal.SIGTERM)
     return "SIGINT" if second else "SIGTERM"
+
+
+# Closing a console window posts WM_CLOSE to it; the console then sends
+# CTRL_CLOSE_EVENT to every process attached to it and ends them about five
+# seconds later. GenerateConsoleCtrlEvent cannot raise that event, so this
+# helper does what the close button does: it finds the server's console
+# window by attaching to the console, leaves it again, and posts WM_CLOSE.
+# It must be a classic console window: a console handed to a terminal (a
+# PseudoConsoleWindow) ignores WM_CLOSE. No window, or the wrong kind, is a
+# failure, not a skip.
+CONSOLE_CLOSE_HELPER = """
+import ctypes, sys
+from ctypes import wintypes
+pid = int(sys.argv[1])
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32.GetConsoleWindow.restype = wintypes.HWND
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+kernel32.FreeConsole()
+if not kernel32.AttachConsole(pid):
+    sys.exit("AttachConsole failed: %d" % ctypes.get_last_error())
+window = kernel32.GetConsoleWindow()
+kernel32.FreeConsole()
+if not window:
+    sys.exit("the server's console has no window to close")
+kind = ctypes.create_unicode_buffer(256)
+user32.GetClassNameW(window, kind, 256)
+if kind.value != "ConsoleWindowClass":
+    sys.exit("the server's console window is a %s, which ignores WM_CLOSE; "
+             "a classic console host (conhost) is needed" % kind.value)
+WM_CLOSE = 0x0010
+if not user32.PostMessageW(window, WM_CLOSE, 0, 0):
+    sys.exit("PostMessageW failed: %d" % ctypes.get_last_error())
+print("posted WM_CLOSE to console window %#x" % window)
+"""
+# What Windows ends a console process with once the time it allows after a
+# console close has run out.
+STATUS_CONTROL_C_EXIT = 0xC000013A
+
+
+def close_console(proc):
+    """Close the server's console window; returns the exit code and seconds."""
+    closed = subprocess.run(
+        [sys.executable, "-I", "-c", CONSOLE_CLOSE_HELPER, str(proc.pid)],
+        capture_output=True, text=True, timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    t0 = time.time()
+    if closed.returncode != 0:
+        proc.kill()
+        proc.wait(30)
+        raise SystemExit("could not close the server's console window: exit "
+                         f"{closed.returncode:#x} {closed.stdout.strip()} {closed.stderr.strip()}")
+    print("INFO", closed.stdout.strip(), flush=True)
+    try:
+        code = proc.wait(30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(30)
+        return "no exit within 30 s", time.time() - t0
+    return code, time.time() - t0
+
+
+def shown(code):
+    return code if isinstance(code, str) else f"{code:#x}"
+
+
+def restart_after_close(config, what):
+    """Start again at once: only a released writer lease lets it start."""
+    global PORT
+    try:
+        proc, PORT = start(config)
+    except SystemExit as error:
+        check(f"lease released by {what}: immediate restart starts", False, error)
+        raise
+    check(f"lease released by {what}: immediate restart starts", True)
+    return proc
+
+
+# The console host a new console gets, for this user. GitHub's Windows
+# runners hand new consoles to a pseudo-console terminal, whose window
+# ignores WM_CLOSE; this GUID selects the classic console host instead.
+CONHOST = "{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}"
+CONSOLE_STARTUP = r"Console\%%Startup"
+
+
+def classic_console_host():
+    """On a CI runner only: give new consoles the classic console host.
+
+    Returns a function that puts the previous setting back. Elsewhere the
+    user's own setting is left alone, and the helper fails if the console
+    window it finds is not a classic one.
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return lambda: None
+    import winreg
+    names = ("DelegationConsole", "DelegationTerminal")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CONSOLE_STARTUP) as key:
+        before = {}
+        for name in names:
+            try:
+                before[name] = winreg.QueryValueEx(key, name)[0]
+            except FileNotFoundError:
+                before[name] = None
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, CONHOST)
+
+    def restore():
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CONSOLE_STARTUP) as key:
+            for name, value in before.items():
+                if value is None:
+                    winreg.DeleteValue(key, name)
+                else:
+                    winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+    return restore
+
+
+def console_close(config):
+    """Windows: close the server's console, idle and then mid-request."""
+    restore = classic_console_host()
+    try:
+        console_close_checks(config)
+    finally:
+        restore()
+
+
+def console_close_checks(config):
+    global PORT
+    proc, PORT = start(config)
+    marker = os.urandom(50_000)
+    s, _, _ = req("PUT", FS + "/console-close", marker)
+    check("put before console close", s == 200, s)
+    code, took = close_console(proc)
+    check("console close: exits 0 within 5 s", code == 0 and took < 5,
+          (shown(code), f"{took:.2f}s"))
+    check("console close: reports a clean stop",
+          any("http stopped" in line for line in proc.out), proc.out[-3:])
+    proc = restart_after_close(config, "console close")
+    s, _, d = req("GET", FS + "/console-close")
+    check("data survives console close", s == 200 and d == marker, s)
+    stop(proc)
+
+    # A client that has stopped reading a download holds the drain open
+    # for as long as the drain and request limits allow: 60 s here, far
+    # beyond the 5 s Windows waits after a console close. (An upload still
+    # being received does not: it is answered 503 at once.) The server must
+    # cut the drain short and release the drive before Windows ends it.
+    big = 64 << 20
+    long_config = write_config("http-long-drain.json", 60_000, upload=big)
+    proc, PORT = start(long_config)
+    s, _, _ = req("PUT", FS + "/large", os.urandom(big))
+    check("put a 64 MiB file", s == 200, s)
+    stalled = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    stalled.connect(("127.0.0.1", PORT))
+    stalled.sendall((f"GET {FS}/large HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                     f"Authorization: Bearer {TOKEN}\r\n\r\n").encode())
+    head = stalled.recv(1024)
+    check("stalled download started", head.startswith(b"HTTP/1.1 200"), head[:40])
+    time.sleep(1)
+    code, took = close_console(proc)
+    stalled.close()
+    killed = code == STATUS_CONTROL_C_EXIT or isinstance(code, str)
+    check("console close mid-download: exits 1 by itself within 5 s",
+          code == 1 and not killed and took < 5, (shown(code), f"{took:.2f}s"))
+    check("console close mid-download: says the drain was cut short",
+          any("drain cut short" in line for line in proc.err), proc.err[-3:])
+    proc = restart_after_close(config, "console close mid-download")
+    s, _, d = req("GET", FS + "/console-close")
+    check("data survives console close mid-download", s == 200 and d == marker, s)
+    stop(proc)
 
 
 def stop(proc, second=False):
@@ -395,6 +573,8 @@ def main():
         # The other stop an operator has: SIGINT on Unix, Ctrl-Break on Windows.
         stopped = True
         stop(proc, second=True)
+        if WINDOWS and not SMOKE:
+            console_close(config)
     finally:
         if not stopped and proc.poll() is None:
             proc.kill()
