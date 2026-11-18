@@ -57,6 +57,9 @@ pub use session_supervisor::SessionSupervisor;
 mod registration_supervisor;
 pub use registration_supervisor::RegistrationSupervisor;
 
+mod sentinel;
+pub use sentinel::{PrimaryClientFactory, ResolvedPrimary, SentinelError, SentinelPrimary};
+
 pub mod placement;
 
 mod failover;
@@ -142,6 +145,7 @@ enum RegistryConnection {
     Fixed(MultiplexedConnection),
     Managed(ConnectionManager),
     Replaceable(ReplaceableManager),
+    Sentinel(sentinel::SentinelManager),
 }
 impl RegistryConnection {
     async fn query<T: redis::FromRedisValue>(&self, command: &redis::Cmd) -> redis::RedisResult<T> {
@@ -149,6 +153,7 @@ impl RegistryConnection {
             Self::Fixed(connection) => command.query_async(&mut connection.clone()).await,
             Self::Managed(connection) => command.query_async(&mut connection.clone()).await,
             Self::Replaceable(connection) => connection.query(command).await,
+            Self::Sentinel(connection) => connection.query(command).await,
         }
     }
 }
@@ -369,6 +374,29 @@ impl RedisRouteRegistry {
             namespace,
             timeout,
         )
+    }
+
+    /// Use the primary of a Redis Sentinel deployment, found through its
+    /// sentinels and looked up again after a failover. Every command goes
+    /// to a server that reported the `master` role when it was connected
+    /// and is checked against the sentinels about once a second while in
+    /// use; a replica is never read or written.
+    ///
+    /// With `resolved`, the registry starts on a connection the caller got
+    /// from [`SentinelPrimary::resolve`], so that an unreachable deployment
+    /// is reported at startup. Without it the first command connects. Must
+    /// be called within a Tokio runtime.
+    pub fn with_sentinel(
+        primary: SentinelPrimary,
+        resolved: Option<ResolvedPrimary>,
+        namespace: String,
+        timeout: Duration,
+    ) -> Result<Self, RegistryError> {
+        let manager = match resolved {
+            Some(resolved) => sentinel::SentinelManager::with_resolved(primary, resolved),
+            None => sentinel::SentinelManager::new(primary),
+        };
+        Self::with_connection(RegistryConnection::Sentinel(manager), namespace, timeout)
     }
 
     fn with_connection(
@@ -1064,6 +1092,127 @@ mod tests {
         println!(
             "REDIS_RECOVERY_SCALE_EVIDENCE volumes=100 restored=100 fences_preserved=100 withdrawn=100"
         );
+    }
+
+    /// A Redis failover can promote a replica that never received the
+    /// current owner's publication and still holds the record it replaced.
+    /// The owner must publish over it, not give up as on a successor's.
+    #[tokio::test]
+    #[ignore = "requires isolated MOUNT_RS_REDIS_TEST_URL"]
+    async fn a_predecessors_record_that_reappears_is_replaced_by_the_current_owner() {
+        let url = std::env::var("MOUNT_RS_REDIS_TEST_URL").expect("isolated Redis URL");
+        let client = redis::Client::open(url).unwrap();
+        let mut redis = client.get_multiplexed_async_connection().await.unwrap();
+        let namespace = format!(
+            "reappear-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let key = format!("mount-rs:{namespace}:route:volume");
+        let registry =
+            RedisRouteRegistry::new(redis.clone(), namespace, Duration::from_secs(2)).unwrap();
+        // Open the volume twice, so that its lease has had a predecessor.
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = mount_rs_sdk::SplitOptions::memory("reappear-owner", 4096);
+        options.metadata = mount_rs_sdk::StoreConfig::Sqlite {
+            path: dir.path().join("metadata.sqlite"),
+        };
+        let blocks = dir.path().join("blocks");
+        std::fs::create_dir(&blocks).unwrap();
+        options.blocks = mount_rs_sdk::StoreConfig::Local { path: blocks };
+        let first = mount_rs_sdk::Filesystem::split(options.clone())
+            .await
+            .unwrap();
+        let predecessor = route(first.checked_owner_fence().await.unwrap());
+        first.shutdown().await.unwrap();
+        let fs = Arc::new(mount_rs_sdk::Filesystem::split(options).await.unwrap());
+        let current = route(fs.checked_owner_fence().await.unwrap());
+        assert!(current.fence > predecessor.fence);
+        let reappear = |mut redis: MultiplexedConnection| {
+            let (key, record) = (key.clone(), predecessor.encode().unwrap());
+            async move {
+                redis::cmd("SET")
+                    .arg(key)
+                    .arg(record)
+                    .arg("PX")
+                    .arg(10_000)
+                    .query_async::<()>(&mut redis)
+                    .await
+                    .unwrap();
+            }
+        };
+
+        let registration = Arc::new(
+            OwnedVolumeRegistration::new(
+                fs.clone(),
+                registry.clone(),
+                current.clone(),
+                Duration::from_millis(600),
+            )
+            .await
+            .unwrap(),
+        );
+        registration.advertise().await.unwrap();
+        reappear(redis.clone()).await;
+        assert_eq!(
+            registry.lookup("volume").await.unwrap(),
+            Some(predecessor.clone())
+        );
+        // The periodic refresh only extends its own record.
+        assert_eq!(
+            registration.refresh().await,
+            Err(RegistrationError::Conflict)
+        );
+        registration.reconcile().await.unwrap();
+        assert_eq!(
+            registry.lookup("volume").await.unwrap(),
+            Some(current.clone())
+        );
+
+        // The same under the supervised worker a server runs: it recovers
+        // instead of failing for good.
+        let stop = tokio_util::sync::CancellationToken::new();
+        let (status_tx, mut status_rx) = tokio::sync::watch::channel(RegistrationStatus::Starting);
+        let (worker, worker_stop) = (registration.clone(), stop.clone());
+        let recovery = RegistrationRecovery {
+            initial_delay: Duration::from_millis(50),
+            max_delay: Duration::from_millis(100),
+            max_attempts: 3,
+        };
+        let task = tokio::spawn(async move {
+            worker
+                .run_with_recovery(worker_stop, status_tx, recovery)
+                .await
+        });
+        wait_registration(&mut status_rx, RegistrationStatus::Ready).await;
+        reappear(redis.clone()).await;
+        wait_registration(
+            &mut status_rx,
+            RegistrationStatus::Recovering(RegistrationError::Conflict),
+        )
+        .await;
+        wait_registration(&mut status_rx, RegistrationStatus::Ready).await;
+        assert_eq!(
+            registry.lookup("volume").await.unwrap(),
+            Some(current.clone())
+        );
+        assert_eq!(fs.checked_owner_fence().await.unwrap(), current.fence);
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(registry.lookup("volume").await.unwrap(), None);
+        redis::cmd("DEL")
+            .arg(&key)
+            .query_async::<i64>(&mut redis)
+            .await
+            .unwrap();
+        fs.shutdown().await.unwrap();
     }
 
     #[tokio::test]

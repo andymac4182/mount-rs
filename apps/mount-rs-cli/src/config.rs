@@ -321,16 +321,47 @@ impl Default for SessionLimitsConfig {
     }
 }
 
+/// `host:port` of one sentinel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SentinelAddress {
+    /// A name or an IP address, without the brackets of an IPv6 literal.
+    pub host: String,
+    pub port: u16,
+}
+
+/// `http.forwarding.redis_sentinel`: a Redis primary and its replicas,
+/// found through the sentinels that monitor them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RedisSentinelConfig {
+    pub sentinels: Vec<SentinelAddress>,
+    /// The name the sentinels monitor the primary under.
+    pub service: String,
+    /// TLS to the sentinels and to the Redis servers alike.
+    pub tls: bool,
+    /// Credentials for the Redis servers.
+    pub username: Option<String>,
+    pub password: Option<EnvReference>,
+    /// Credentials for the sentinels, which are configured separately.
+    pub sentinel_username: Option<String>,
+    pub sentinel_password: Option<EnvReference>,
+    pub database: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ForwardingConfig {
     pub peers: PathBuf,
     pub certificate: PathBuf,
     pub private_key: PathBuf,
     pub ca: PathBuf,
-    pub redis_url: EnvReference,
-    /// PEM bundle that replaces the system roots for a `rediss://` server.
+    /// The single Redis server of the registry. Exactly one of this and
+    /// `redis_sentinel` is set.
+    pub redis_url: Option<EnvReference>,
+    /// The Redis Sentinel deployment of the registry.
+    pub redis_sentinel: Option<RedisSentinelConfig>,
+    /// PEM bundle that replaces the system roots for a TLS Redis server,
+    /// and with Sentinel for the sentinels too.
     pub redis_ca: Option<PathBuf>,
-    /// Permit an unencrypted `redis://` connection to another host.
+    /// Permit an unencrypted Redis connection to another host.
     pub allow_plaintext_redis: bool,
     pub namespace: String,
     pub bind: std::net::SocketAddr,
@@ -1040,6 +1071,7 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "private_key",
             "ca",
             "redis_url",
+            "redis_sentinel",
             "redis_ca",
             "allow_plaintext_redis",
             "namespace",
@@ -1104,6 +1136,39 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
             "must be between 1 and 1024",
         ));
     }
+    let redis_ca = optional_path(fields, "redis_ca", path, base)?;
+    let allow_plaintext_redis =
+        optional_bool(fields, "allow_plaintext_redis", path)?.unwrap_or(false);
+    let (redis_url, redis_sentinel) = match (
+        fields.contains_key("redis_url"),
+        fields.get("redis_sentinel"),
+    ) {
+        (true, Some(_)) => {
+            return Err(ConfigError::at(
+                "config.http.forwarding.redis_sentinel",
+                "cannot be combined with redis_url: name the registry either by redis_url \
+                 (one Redis server) or by redis_sentinel, not both",
+            ));
+        }
+        (false, None) => {
+            return Err(ConfigError::at(
+                path,
+                "requires redis_url (one Redis server) or redis_sentinel",
+            ));
+        }
+        (true, None) => (
+            Some(required_env_reference(fields, "redis_url", path)?),
+            None,
+        ),
+        (false, Some(value)) => (
+            None,
+            Some(parse_redis_sentinel(
+                value,
+                redis_ca.is_some(),
+                allow_plaintext_redis,
+            )?),
+        ),
+    };
     Ok(ForwardingConfig {
         route_refresh_idle_ttls,
         membership_reload_seconds: u64::from(membership_reload_seconds),
@@ -1117,16 +1182,166 @@ fn parse_forwarding(value: &Value, base: &Path) -> Result<ForwardingConfig, Conf
         certificate: required_path(fields, "certificate", path, base)?,
         private_key: required_path(fields, "private_key", path, base)?,
         ca: required_path(fields, "ca", path, base)?,
-        redis_url: required_env_reference(fields, "redis_url", path)?,
-        redis_ca: optional_path(fields, "redis_ca", path, base)?,
-        allow_plaintext_redis: optional_bool(fields, "allow_plaintext_redis", path)?
-            .unwrap_or(false),
+        redis_url,
+        redis_sentinel,
+        redis_ca,
+        allow_plaintext_redis,
         namespace: namespace.to_owned(),
         bind: required_string(fields, "bind", path)?
             .parse()
             .map_err(|_| {
                 ConfigError::at("config.http.forwarding.bind", "invalid UDP socket address")
             })?,
+    })
+}
+
+/// Whether `host` can only be this machine. A name other than `localhost`
+/// is never assumed to be, whatever it resolves to.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// Whether `host` is a DNS name or IPv4 address that is safe to place in a
+/// connection address: letters, digits, '.', '-' and '_' only.
+pub(crate) fn is_plain_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+}
+
+/// Parse one sentinel's `host:port`; an IPv6 literal is written `[::1]:26379`.
+fn parse_sentinel_address(value: &str) -> Option<SentinelAddress> {
+    let (host, port) = value.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+    let host = match host.strip_prefix('[') {
+        Some(literal) => {
+            let literal = literal.strip_suffix(']')?;
+            literal.parse::<std::net::Ipv6Addr>().ok()?;
+            literal
+        }
+        None if is_plain_host(host) => host,
+        None => return None,
+    };
+    Some(SentinelAddress {
+        host: host.to_owned(),
+        port,
+    })
+}
+
+/// Parse `http.forwarding.redis_sentinel`. `has_ca` and `allow_plaintext`
+/// are the sibling `redis_ca` and `allow_plaintext_redis`, which apply to
+/// the sentinels and to the Redis servers they name.
+fn parse_redis_sentinel(
+    value: &Value,
+    has_ca: bool,
+    allow_plaintext: bool,
+) -> Result<RedisSentinelConfig, ConfigError> {
+    let path = "config.http.forwarding.redis_sentinel";
+    let at = |key: &str, message: &str| ConfigError::at(&format!("{path}.{key}"), message);
+    let fields = object(value, path)?;
+    reject_unknown(
+        fields,
+        &[
+            "sentinels",
+            "service",
+            "tls",
+            "username",
+            "password",
+            "sentinel_username",
+            "sentinel_password",
+            "database",
+        ],
+        path,
+    )?;
+    let listed = fields
+        .get("sentinels")
+        .ok_or_else(|| at("sentinels", "is required"))?
+        .as_array()
+        .ok_or_else(|| at("sentinels", "must be an array of \"host:port\" strings"))?;
+    if listed.is_empty() || listed.len() > 16 {
+        return Err(at("sentinels", "must list between 1 and 16 sentinels"));
+    }
+    let mut sentinels: Vec<SentinelAddress> = Vec::new();
+    for (index, entry) in listed.iter().enumerate() {
+        let entry_path = format!("{path}.sentinels[{index}]");
+        let address = entry
+            .as_str()
+            .and_then(parse_sentinel_address)
+            .ok_or_else(|| {
+                ConfigError::at(
+                    &entry_path,
+                    "must be \"host:port\" with a port from 1 to 65535; write an IPv6 address \
+                     as \"[::1]:26379\"",
+                )
+            })?;
+        if sentinels
+            .iter()
+            .any(|seen| seen.port == address.port && seen.host.eq_ignore_ascii_case(&address.host))
+        {
+            return Err(ConfigError::at(&entry_path, "is listed more than once"));
+        }
+        sentinels.push(address);
+    }
+    let service = required_string(fields, "service", path)?;
+    if service.len() > 256 || !is_plain_host(service) {
+        return Err(at(
+            "service",
+            "must be the name the sentinels monitor the primary under: 1 to 256 letters, \
+             digits, '.', '-' or '_'",
+        ));
+    }
+    let tls = optional_bool(fields, "tls", path)?.unwrap_or(true);
+    if has_ca && !tls {
+        return Err(at(
+            "tls",
+            "is false but http.forwarding.redis_ca is set; a CA is only used with TLS",
+        ));
+    }
+    if !tls
+        && !allow_plaintext
+        && let Some(index) = sentinels
+            .iter()
+            .position(|address| !is_loopback_host(&address.host))
+    {
+        return Err(ConfigError::at(
+            &format!("{path}.sentinels[{index}]"),
+            "would be an unencrypted connection to another host: leave tls on, or set \
+             http.forwarding.allow_plaintext_redis to true if the network between this \
+             server, the sentinels and the Redis servers is trusted",
+        ));
+    }
+    let credentials = |user: &str, secret: &str| -> Result<_, ConfigError> {
+        let username = optional_nonempty_string(fields, user, path)?;
+        let password = fields
+            .contains_key(secret)
+            .then(|| required_env_reference(fields, secret, &format!("{path}.{secret}")))
+            .transpose()?;
+        if username.is_some() && password.is_none() {
+            return Err(at(user, &format!("requires {secret}")));
+        }
+        Ok((username, password))
+    };
+    let (username, password) = credentials("username", "password")?;
+    let (sentinel_username, sentinel_password) =
+        credentials("sentinel_username", "sentinel_password")?;
+    let database = optional_u32(fields, "database", path)?.unwrap_or(0);
+    if database > 65_535 {
+        return Err(at("database", "must be between 0 and 65535"));
+    }
+    Ok(RedisSentinelConfig {
+        sentinels,
+        service: service.to_owned(),
+        tls,
+        username,
+        password,
+        sentinel_username,
+        sentinel_password,
+        database,
     })
 }
 
@@ -3860,6 +4075,235 @@ mod tests {
         // A misspelled key is refused rather than silently ignored.
         source["http"]["forwarding"]["allow_plaintext"] = true.into();
         assert!(parse(&source).is_err());
+    }
+
+    fn sentinel_source(sentinel: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"version":1,"http":{"drives":[],"forwarding":{
+            "peers":"peers.json","certificate":"cert.pem","private_key":"key.pem","ca":"ca.pem",
+            "bind":"0.0.0.0:0","namespace":"prod","redis_sentinel":sentinel
+        }}})
+    }
+
+    fn parse_forwarding_source(
+        source: &serde_json::Value,
+    ) -> Result<ForwardingConfig, ConfigError> {
+        parse_config_str(&source.to_string(), Path::new("/etc/mount-rs"))
+            .map(|config| config.http.unwrap().forwarding.unwrap())
+    }
+
+    #[test]
+    fn redis_sentinel_takes_addresses_a_service_and_separate_credentials() {
+        let minimal = parse_forwarding_source(&sentinel_source(serde_json::json!({
+            "sentinels":["sentinel-1.internal:26379"],"service":"mount-rs"
+        })))
+        .unwrap();
+        assert_eq!(minimal.redis_url, None);
+        let sentinel = minimal.redis_sentinel.unwrap();
+        assert_eq!(
+            sentinel,
+            RedisSentinelConfig {
+                sentinels: vec![SentinelAddress {
+                    host: "sentinel-1.internal".into(),
+                    port: 26379
+                }],
+                service: "mount-rs".into(),
+                // TLS unless it is turned off.
+                tls: true,
+                username: None,
+                password: None,
+                sentinel_username: None,
+                sentinel_password: None,
+                database: 0,
+            }
+        );
+
+        let mut source = sentinel_source(serde_json::json!({
+            "sentinels":["10.0.0.1:26379","[2001:db8::2]:26380","sentinel-3:26379"],
+            "service":"registry_1.a","tls":true,"database":3,
+            "username":"svc","password":{"env":"REDIS_PASSWORD"},
+            "sentinel_username":"watcher","sentinel_password":{"env":"SENTINEL_PASSWORD"}
+        }));
+        source["http"]["forwarding"]["redis_ca"] = "redis-ca.pem".into();
+        let full = parse_forwarding_source(&source).unwrap();
+        assert_eq!(
+            full.redis_ca,
+            Some(PathBuf::from("/etc/mount-rs/redis-ca.pem"))
+        );
+        let sentinel = full.redis_sentinel.unwrap();
+        assert_eq!(
+            sentinel
+                .sentinels
+                .iter()
+                .map(|address| (address.host.as_str(), address.port))
+                .collect::<Vec<_>>(),
+            [
+                ("10.0.0.1", 26379),
+                ("2001:db8::2", 26380),
+                ("sentinel-3", 26379)
+            ]
+        );
+        assert_eq!(sentinel.service, "registry_1.a");
+        assert_eq!(sentinel.database, 3);
+        assert_eq!(sentinel.username.as_deref(), Some("svc"));
+        assert_eq!(sentinel.password.unwrap().name, "REDIS_PASSWORD");
+        assert_eq!(sentinel.sentinel_username.as_deref(), Some("watcher"));
+        assert_eq!(
+            sentinel.sentinel_password.unwrap().name,
+            "SENTINEL_PASSWORD"
+        );
+    }
+
+    #[test]
+    fn redis_sentinel_and_redis_url_are_alternatives() {
+        let sentinel = serde_json::json!({"sentinels":["127.0.0.1:26379"],"service":"mount-rs"});
+        let mut both = sentinel_source(sentinel.clone());
+        both["http"]["forwarding"]["redis_url"] = serde_json::json!({"env":"MOUNT_REGISTRY"});
+        let error = parse_forwarding_source(&both).unwrap_err().to_string();
+        assert!(
+            error.contains("config.http.forwarding.redis_sentinel"),
+            "{error}"
+        );
+        assert!(
+            error.contains("cannot be combined with redis_url"),
+            "{error}"
+        );
+
+        let mut neither = sentinel_source(sentinel);
+        let forwarding = neither["http"]["forwarding"].as_object_mut().unwrap();
+        forwarding.remove("redis_sentinel");
+        let error = parse_forwarding_source(&neither).unwrap_err().to_string();
+        assert!(
+            error.contains("requires redis_url (one Redis server) or redis_sentinel"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn redis_sentinel_fields_are_validated() {
+        let valid = serde_json::json!({
+            "sentinels":["127.0.0.1:26379","127.0.0.1:26380"],"service":"mount-rs"
+        });
+        assert!(parse_forwarding_source(&sentinel_source(valid.clone())).is_ok());
+        let rejected = |key: &str, value: serde_json::Value, expected: &str| {
+            let mut sentinel = valid.clone();
+            if value.is_null() {
+                sentinel.as_object_mut().unwrap().remove(key);
+            } else {
+                sentinel[key] = value;
+            }
+            let error = parse_forwarding_source(&sentinel_source(sentinel))
+                .expect_err(key)
+                .to_string();
+            assert!(error.contains(expected), "{key}: {error}");
+        };
+        let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        rejected(
+            "sentinels",
+            json("null"),
+            "redis_sentinel.sentinels: is required",
+        );
+        rejected("sentinels", json("[]"), "between 1 and 16");
+        rejected(
+            "sentinels",
+            json(r#""127.0.0.1:26379""#),
+            "must be an array",
+        );
+        rejected(
+            "sentinels",
+            serde_json::Value::Array(
+                (0..17)
+                    .map(|index| format!("127.0.0.1:{}", 26379 + index).into())
+                    .collect(),
+            ),
+            "between 1 and 16",
+        );
+        for address in [
+            r#"["127.0.0.1"]"#,
+            r#"["127.0.0.1:0"]"#,
+            r#"["127.0.0.1:65536"]"#,
+            r#"[":26379"]"#,
+            r#"["::1:26379"]"#,
+            r#"["[::1]"]"#,
+            r#"["[not-ipv6]:26379"]"#,
+            r#"["redis://127.0.0.1:26379"]"#,
+            r#"["user:secret@127.0.0.1:26379"]"#,
+            r#"["127.0.0.1:26379/0"]"#,
+            r#"[26379]"#,
+        ] {
+            rejected(
+                "sentinels",
+                json(address),
+                "sentinels[0]: must be \"host:port\"",
+            );
+        }
+        rejected(
+            "sentinels",
+            json(r#"["LOCALHOST:26379","localhost:26379"]"#),
+            "sentinels[1]: is listed more than once",
+        );
+        rejected(
+            "service",
+            json("null"),
+            "redis_sentinel.service: is required",
+        );
+        for service in [r#""""#, r#""my master""#, r#""a/b""#, "7"] {
+            rejected("service", json(service), "redis_sentinel.service");
+        }
+        rejected("tls", json(r#""yes""#), "must be a boolean");
+        rejected("username", json(r#""svc""#), "username: requires password");
+        rejected("username", json(r#""""#), "must not be empty");
+        rejected(
+            "sentinel_username",
+            json(r#""watcher""#),
+            "sentinel_username: requires sentinel_password",
+        );
+        // A password is named by its environment variable, never written.
+        rejected("password", json(r#""hunter2""#), "must be an object");
+        rejected(
+            "sentinel_password",
+            json(r#"{"env":"not a name"}"#),
+            "valid environment",
+        );
+        rejected("database", json("-1"), "unsigned integer");
+        rejected("database", json("65536"), "between 0 and 65535");
+        rejected("master", json(r#""mount-rs""#), "unknown field");
+    }
+
+    #[test]
+    fn redis_sentinel_applies_the_plaintext_and_ca_rules_to_every_sentinel() {
+        let plain = |sentinels: &[&str]| {
+            sentinel_source(serde_json::json!({
+                "sentinels":sentinels,"service":"mount-rs","tls":false
+            }))
+        };
+        // Plaintext to this host only, unless it is explicitly allowed.
+        let local = plain(&["127.0.0.1:26379", "localhost:26380", "[::1]:26381"]);
+        assert!(
+            !parse_forwarding_source(&local)
+                .unwrap()
+                .redis_sentinel
+                .unwrap()
+                .tls
+        );
+        let mut remote = plain(&["127.0.0.1:26379", "10.0.0.2:26379"]);
+        let error = parse_forwarding_source(&remote).unwrap_err().to_string();
+        assert!(error.contains("redis_sentinel.sentinels[1]"), "{error}");
+        assert!(error.contains("allow_plaintext_redis"), "{error}");
+        remote["http"]["forwarding"]["allow_plaintext_redis"] = true.into();
+        assert!(parse_forwarding_source(&remote).is_ok());
+        // With TLS any host is accepted, and only then may a CA be set.
+        let mut tls = sentinel_source(serde_json::json!({
+            "sentinels":["10.0.0.2:26379"],"service":"mount-rs"
+        }));
+        tls["http"]["forwarding"]["redis_ca"] = "redis-ca.pem".into();
+        assert!(parse_forwarding_source(&tls).is_ok());
+        let mut ca_without_tls = plain(&["127.0.0.1:26379"]);
+        ca_without_tls["http"]["forwarding"]["redis_ca"] = "redis-ca.pem".into();
+        let error = parse_forwarding_source(&ca_without_tls)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("redis_sentinel.tls"), "{error}");
+        assert!(error.contains("redis_ca"), "{error}");
     }
 
     #[test]

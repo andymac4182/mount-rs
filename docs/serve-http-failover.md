@@ -136,6 +136,8 @@ announcement is withdrawn too.
    and from then on the first holder's fence is rejected by storage.
 6. Routes only move forward: a takeover publishes a strictly higher fence,
    and Redis refuses to replace a live route with a lower or equal one.
+   (A Redis Sentinel failover can bring an older route back for a few
+   seconds; see [Redis Sentinel](#redis-sentinel).)
 
 ## Clocks
 
@@ -332,6 +334,114 @@ gives up after 50 s).
   during the outage, the drive stays unavailable until a standby can read
   Redis again: a standby never opens a drive on a registry it cannot read.
 
+## Redis Sentinel
+
+With `http.forwarding.redis_sentinel` the registry is the primary of a
+Redis Sentinel deployment (one primary, its replicas, and the sentinels
+that monitor them) instead of a single Redis server. Nothing above changes:
+Redis still only holds hints, and the storage lease is still the only
+authority. This section is what a failover of *Redis* does to those hints.
+
+**Which server is used.** A server asks its configured sentinels, in order
+from the one that answered last, for the address of the primary
+(`SENTINEL GET-MASTER-ADDR-BY-NAME`), connects to the address named, and
+uses it only if that server itself reports the `master` role. Every
+registry command (the route scripts, the route read, the candidate script)
+goes to that one connection. A replica is never read or written.
+
+**When the primary is looked up again.**
+
+- The connection drops or is refused.
+- A command is answered `READONLY` or `MASTERDOWN`: the server was demoted.
+- Three commands in a row go unanswered.
+- About once a second while commands are being sent, a check finds that
+  the sentinels name another address, or that the connected server no
+  longer reports `master`. A demoted primary keeps answering reads, so this
+  check is what moves a server that only reads (an ingress, a standby). A
+  check that cannot reach a sentinel changes nothing.
+
+The command that met the failure is not sent again. Its caller sees an
+unavailable registry and does what it does in any Redis outage: an owner
+keeps its lease and its own listener, a forwarded request gets `503`
+not-dispatched, a standby takes that poll as no evidence. Until the
+sentinels have promoted a replica there is no primary to find, and every
+lookup fails; this is the outage described under Redis outages, and it
+lasts as long as the sentinels take (`down-after-milliseconds` plus the
+election).
+
+**What the promoted server may have forgotten.** Redis replication is
+asynchronous. The new primary can lack the last writes the old one
+acknowledged, and can still hold what those writes replaced or deleted.
+Each case, and what the cluster does:
+
+| The new primary... | What happens | For how long |
+| --- | --- | --- |
+| lacks an owner's route, or has it with less time left than the owner believes | Requests that need forwarding get `503` not-dispatched. A standby that reads "no route" may try to open the drive; the open fails with `EAGAIN` because the owner holds the lease, and nothing changes. The owner's next refresh finds its record missing and publishes it again. | At most one refresh interval (5 s) after the owner reaches the new primary, plus one reconciliation. |
+| still holds a **predecessor's** route (a lower fence) that the current owner had replaced, or that the predecessor had withdrawn | Forwarders send requests for the drive to the predecessor. If that server is running it refuses them (`503` not-dispatched): it no longer holds that registration, and it checks its own lease before serving. If it is gone, the requests wait and fail as in "What clients see" for a crashed owner. No request is served by it. The current owner publishes over the old record at its next refresh: a lower fence never blocks a higher one. | Until the owner's next refresh (at most 5 s after it reaches the new primary), or until the old record's remaining lifetime (at most 15 s) runs out, whichever is first. |
+| lacks a candidate's announcement, or still lists a candidate that has withdrawn or died | Only the order in which standbys try (`k x S`) is affected. Announcements are repeated every 5 s and expire after 15 s. | At most 15 s. |
+
+A record with a **higher** fence than the live owner's cannot reappear:
+fences are issued by storage and only grow, and a route is published only
+under the fence of a lease that was actually granted. So a promoted replica
+can show an older route for a few seconds, but it can never make the
+current owner give its drive up, and it can never make another node able to
+write. Invariant 6 ("routes only move forward") therefore holds on any one
+Redis server, and across a Redis failover it holds again once the owner has
+refreshed.
+
+One real fault was found and fixed here. An owner **without** `failover`
+used to treat any route it did not write as a conflict when it reconciled,
+and stopped with exit status 1. A predecessor's record reappearing after a
+Redis failover (the second row above) would have stopped the drive's
+correct owner. It now publishes over a record with a lower fence, as a
+failover candidate always did, and still stops for a record with an equal
+or higher fence that is not its own.
+`a_predecessors_record_that_reappears_is_replaced_by_the_current_owner` in
+`crates/mount-rs-cluster` covers the registration, and
+`apps/mount-rs-cli/tests/redis_sentinel.rs` puts a predecessor's record back
+on a promoted primary under a running failover owner.
+
+**Clocks.** Route lifetimes and candidate announcements expire on the Redis
+server's clock, and after a failover that is another host's clock. Redis
+replicates expiries as absolute times, so a new primary whose clock is
+ahead of the old one's ends records early by the difference (owners publish
+again within a refresh interval), and one that is behind keeps a dead
+owner's route or announcement for that much longer than 15 s. Keep the
+Redis hosts' clocks together (NTP is enough). Not tested: the test
+deployment runs on one host.
+
+**An old primary that is cut off but still running.** Until it learns that
+it was replaced, it accepts writes that will be discarded. A server that
+can still reach it, and a sentinel that names another primary, leaves it
+within about a second (the periodic check). A server that can reach only
+the old primary and sentinels that still name it keeps publishing there,
+where the rest of the cluster does not look: its drives get `503` through
+the other servers and stay served on its own listener, exactly as for an
+owner cut off from Redis. There is still one writer, because the lease is
+in storage. Redis's own `min-replicas-to-write` shortens this window. **Not
+tested:** a partition of the Redis deployment. The tests kill the primary
+and later start it again.
+
+**Measured** by `apps/mount-rs-cli/tests/redis_sentinel.rs` with real
+servers, Redis 8.4, one primary, two replicas and three sentinels
+(`down-after-milliseconds 2000`, quorum 2), all in one container on a
+laptop, over seven runs, with and without TLS and passwords:
+
+| Step | Measured |
+| --- | --- |
+| `kill -9` of the primary to a promoted replica | 3.1 to 5.9 s |
+| To the owner's route being on the new primary | 3.2 to 7.2 s after the kill (0.1 to 1.5 s after the promotion) |
+| To a write forwarded through an ingress succeeding | 3.2 to 7.0 s after the kill |
+| Longest time a client repeating one forwarded read went without an answer | 2.2 to 4.0 s; every other answer in between was a `503` |
+| Direct requests to the owner during all of it | all served; longest gap 0.11 to 0.27 s |
+| A route deleted from the new primary, to the owner publishing it again | 0.6 to 3.0 s |
+| A predecessor's route put back on the new primary, to the failover owner publishing over it | 4.7 to 4.9 s |
+| With two candidates: the lease, the owner and the fence | unchanged; the standby never opened the drive and logged no `lease_held` |
+| The owner then killed: the standby's route on the promoted primary | 11.6 to 14.7 s (12 s lease) |
+
+The old primary, started again, was reconfigured as a replica by the
+sentinels and no server returned to it.
+
 ## What clients see
 
 | Situation | Response |
@@ -436,6 +546,13 @@ long.
   drive (it is retaken once the forged record is gone). Restrict the
   namespace as the README describes.
 - **Stale reads under clock skew** beyond the 5 s renewal margin; see Clocks.
+- **Redis Cluster.** The registry talks to one Redis server, or to the
+  primary of a Redis Sentinel deployment. There is no cluster redirection
+  in the client: a Redis Cluster endpoint is not supported and not tested.
+- **A partition inside a Redis Sentinel deployment**, Redis hosts whose
+  clocks differ, and sentinels added or removed while servers run (the
+  sentinel list is read from the configuration at startup) are not tested;
+  see [Redis Sentinel](#redis-sentinel).
 - **A standby's attempt on SQLite metadata takes the write lock but writes
   nothing.** Opening the metadata store checks the schema and tries the
   lease in `BEGIN IMMEDIATE` transactions, so an attempt waits for, and

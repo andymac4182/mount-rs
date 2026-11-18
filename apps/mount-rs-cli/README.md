@@ -978,7 +978,9 @@ Distribute a trusted membership file to the servers. Each server uses its own ce
 
 `http.forwarding.redis_url` names an environment variable; the variable
 holds the URL, so a password never appears in the config file. Each server
-connects to the one endpoint in that URL.
+connects to the one endpoint in that URL. For a highly available registry
+use `http.forwarding.redis_sentinel` instead; see
+[Running Redis highly available](#running-redis-highly-available).
 
 | URL | Connection |
 | --- | --- |
@@ -991,9 +993,10 @@ startup, as is a URL that cannot be parsed.
 
 | `http.forwarding` key | Default | Meaning |
 | --- | --- | --- |
-| `redis_url` | required | `{"env": "NAME"}`: the variable that holds the URL. |
-| `redis_ca` | system roots | Path to a PEM file of CA certificates, relative to the config file. When set, only these certificates are trusted for the Redis server, and the URL must be `rediss://`. |
-| `allow_plaintext_redis` | `false` | Set to `true` to permit `redis://` to a host other than this one. |
+| `redis_url` | one of the two is required | `{"env": "NAME"}`: the variable that holds the URL of a single Redis server. |
+| `redis_sentinel` | one of the two is required | A Redis Sentinel deployment: its sentinels, the service name and credentials. Cannot be combined with `redis_url`. |
+| `redis_ca` | system roots | Path to a PEM file of CA certificates, relative to the config file. When set, only these certificates are trusted for the Redis server (and, with `redis_sentinel`, the sentinels), and the connection must use TLS. |
+| `allow_plaintext_redis` | `false` | Set to `true` to permit an unencrypted connection to a Redis server or sentinel on a host other than this one. |
 
 **TLS.** A `rediss://` server must present a certificate that chains to a
 trusted root and that names the host or IP address written in the URL. The
@@ -1069,24 +1072,84 @@ ownership changes, not Redis outages.
 
 #### Running Redis highly available
 
-A server connects to the single endpoint in its URL and reconnects to that
-same endpoint, resolving the name again each time. Redis Sentinel and Redis
-Cluster addresses are not supported: there is no Sentinel discovery and no
-cluster redirection in the client as built.
+With `redis_url` a server connects to the single endpoint in its URL and
+reconnects to that same endpoint, resolving the name again each time. That
+Redis is then a single point of failure for forwarding and for drive
+failover (never for an owner serving its own drives).
 
-To make Redis highly available, put it behind one stable name or address
-that always reaches the current primary: a managed service's primary
-endpoint, or a virtual address moved by your failover tooling. After a
+**Redis Sentinel** removes it. Set `redis_sentinel` instead of `redis_url`:
+
+```json
+"forwarding": {
+  "redis_sentinel": {
+    "sentinels": ["10.0.2.11:26379", "10.0.2.12:26379", "10.0.2.13:26379"],
+    "service": "mount-rs",
+    "password": {"env": "MOUNT_RS_REDIS_PASSWORD"},
+    "sentinel_password": {"env": "MOUNT_RS_SENTINEL_PASSWORD"}
+  },
+  "redis_ca": "/etc/mount-rs/tls/redis-ca.pem"
+}
+```
+
+| `redis_sentinel` key | Default | Meaning |
+| --- | --- | --- |
+| `sentinels` | required | 1 to 16 `"host:port"` strings, each sentinel once (`"[2001:db8::1]:26379"` for IPv6). |
+| `service` | required | The name the sentinels monitor the primary under. |
+| `tls` | `true` | TLS to the sentinels and to the Redis servers. One setting covers both. |
+| `username`, `password` | none | Credentials for the Redis servers. `password` is `{"env": "NAME"}`; `username` requires it. |
+| `sentinel_username`, `sentinel_password` | none | Credentials for the sentinels. They are separate from the Redis servers' and are not copied from them. |
+| `database` | `0` | The database on the Redis servers. |
+
+The rules above apply to every connection: with TLS, the certificate of
+each sentinel and of the Redis server a sentinel names must chain to the
+system roots or `redis_ca` and be valid for the address used (for the
+Redis servers that is the address the sentinels report, normally an IP
+address); verification cannot be turned off and client certificates are not
+supported. With `tls: false`, a sentinel or a named primary on another host
+is refused unless `allow_plaintext_redis` is `true`. `redis_url` together
+with `redis_sentinel`, or neither, is a configuration error (exit status
+2), as is `redis_ca` with `tls: false`.
+
+A server asks the sentinels for the primary, connects to it and requires it
+to report the `master` role, at startup (exit status 1 if there is none)
+and again whenever its connection drops, a command is refused with
+`READONLY`, three commands go unanswered, or a check made about once a
+second finds that the sentinels name another server. It never reads or
+writes a replica, and it does not replay the command that failed.
+
+When the primary fails, forwarded requests get 503 until the sentinels have
+promoted a replica and the servers have found it; owners keep serving their
+own drives; nothing restarts. Redis replicates asynchronously, so the
+promoted server can lack the latest routes, or still hold an older one: the
+owners put that right within one refresh interval (5 seconds), and no
+request is ever served by a server that does not hold the drive's lease.
+The reasoning, the measurements and the limits are under
+["Redis Sentinel"](../../docs/serve-http-failover.md#redis-sentinel) in the
+failover design, and deployment steps in the
+[runbook](../../docs/serve-http-runbook.md#redis-sentinel).
+
+An ACL user for the Redis servers needs `+role` added to the rule above.
+
+**Redis Cluster is not supported**: there is no cluster redirection in the
+client.
+
+Without Sentinel, the alternative is one stable name or address that always
+reaches the current primary (a managed service's primary endpoint, or a
+virtual address moved by your failover tooling) in `redis_url`. After a
 failover the servers reconnect, and owners re-register any routes the new
-primary does not have, exactly as after an outage. Forwarded requests fail
-with 503 in between.
+primary does not have, exactly as after an outage.
 
 What is tested: one Redis 8.4, with TLS and without, stopped or cut off for
 longer than the route lifetime and then restored, and every connection
-killed by the server. What is not tested: a replicated pair failing over,
-Sentinel, Redis Cluster, a proxy such as Envoy or HAProxy in front of Redis,
-and reconnecting to an endpoint that still resolves to a demoted, read-only
-replica.
+killed by the server; and a Redis 8.4 Sentinel deployment (one primary, two
+replicas, three sentinels), with TLS and passwords and without, whose
+primary is killed, replaced by a promoted replica and later started again
+(`apps/mount-rs-cli/tests/redis_sentinel.rs`). What is not tested: a
+network partition inside a Sentinel deployment, Redis hosts with different
+clocks, an ACL user with Sentinel, a replicated pair behind one `redis_url`
+address failing over, Redis Cluster, a proxy such as Envoy or HAProxy in
+front of Redis, and reconnecting through `redis_url` to an endpoint that
+still resolves to a demoted, read-only replica.
 
 #### The membership file
 
