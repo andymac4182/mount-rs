@@ -29,7 +29,7 @@ for (const driver of [minimal, { ...minimal, capabilities: { readOnly: true, han
 // structural driver directly, including NFS RPC and P9 file reads.
 await new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [fileURLToPath(new URL("servers.mjs", import.meta.url))], {
-    env: { ...process.env, MOUNT_RS_STRUCTURAL_SERVERS: "1" }, stdio: "inherit", timeout: 30_000,
+    env: { ...process.env, MOUNT_RS_STRUCTURAL_SERVERS: "1" }, stdio: "inherit", timeout: 120_000,
   })
   child.on("error", reject)
   child.on("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`structural servers: ${code}/${signal}`)))

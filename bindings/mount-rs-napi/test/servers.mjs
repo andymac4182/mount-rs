@@ -42,6 +42,9 @@ if (process.env.MOUNT_RS_STRUCTURAL_SERVERS === "1") {
 }
 
 const IO_TIMEOUT_MS = 20_000;
+// The outermost limit covers every phase a run asks for, not one I/O call.
+// On a Windows runner the WebDAV phase alone has taken over 15 s.
+const SUITE_TIMEOUT_MS = 90_000;
 let activePhase = { label: "startup", startedAt: Date.now() };
 
 function phaseSummary() {
@@ -67,7 +70,7 @@ function markPhase(label) {
   activePhase = { label, startedAt: Date.now() };
 }
 
-async function within(promise, label) {
+async function within(promise, label, limitMs = IO_TIMEOUT_MS) {
   let timer;
   try {
     return await Promise.race([
@@ -77,10 +80,10 @@ async function within(promise, label) {
           () =>
             reject(
               new Error(
-                `${typeof label === "function" ? label() : label} timed out after ${IO_TIMEOUT_MS}ms`,
+                `${typeof label === "function" ? label() : label} timed out after ${limitMs}ms`,
               ),
             ),
-          IO_TIMEOUT_MS,
+          limitMs,
         );
       }),
     ]);
@@ -3134,6 +3137,7 @@ await within(
     await runPhase("WebDAV exercise", exerciseWebdav);
   })(),
   () => `N-API server integration (${phaseSummary()})`,
+  SUITE_TIMEOUT_MS,
 );
 
 console.log("mount-rs N-API server integration: PASS");
