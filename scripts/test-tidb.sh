@@ -847,15 +847,48 @@ run_statement_timeout_test() {
       -- --ignored --nocapture --test-threads=1
 }
 
+# Run one ignored provider library test by its exact name. A name filter that
+# matches nothing still exits 0, so the test must also be reported as the one
+# test that passed.
+run_exact_provider_lib_test() {
+  exact_test=$1
+  exact_log="$run_dir/$exact_test.log"
+  set +e
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
+      "storage::tests::$exact_test" \
+      -- --ignored --exact --nocapture --test-threads=1 >"$exact_log" 2>&1
+  exact_status=$?
+  set -e
+  cat "$exact_log" >&2
+  if [ "$exact_status" -ne 0 ]; then
+    return "$exact_status"
+  fi
+  if ! grep -q '^test result: ok\. 1 passed; 0 failed; 0 ignored' "$exact_log"; then
+    echo "test-tidb.sh: $exact_test did not run" >&2
+    return 1
+  fi
+}
+
 run_conflict_classification_test() {
   phase_name="conflict classification test"
   echo "TiDB phase=$phase_name" >&2
-  # Provokes TiDB's write-conflict and lock-wait errors for autocommit
-  # statements and checks that none of those statements committed.
-  MOUNT_RS_TIDB_URL="$tidb_url" \
-    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --lib \
-      actual_tidb_autocommit_conflicts_are_known_non_commits \
-      -- --ignored --nocapture --test-threads=1
+  # Provokes TiDB's write-conflict, lock-wait and deadlock errors for
+  # autocommit statements and checks that none of those statements committed.
+  run_exact_provider_lib_test actual_tidb_autocommit_conflicts_are_known_non_commits
+  run_exact_provider_lib_test actual_tidb_autocommit_deadlock_is_a_known_non_commit
+}
+
+run_gc_life_time_test() {
+  # Opt-in: about 22 minutes, because TiDB accepts no GC life time below ten
+  # minutes. No CI job sets this, so the provider reports error 9006 from an
+  # autocommit statement as an unknown outcome.
+  if [ "${MOUNT_RS_TIDB_GC_LIFE_TIME_TEST:-0}" != 1 ]; then
+    return 0
+  fi
+  phase_name="GC life time test"
+  echo "TiDB phase=$phase_name" >&2
+  run_exact_provider_lib_test actual_tidb_gc_life_time_error_is_an_unknown_autocommit_outcome
 }
 
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2
@@ -979,6 +1012,7 @@ run_trace_test
 run_ambiguous_commit_test
 run_statement_timeout_test
 run_conflict_classification_test
+run_gc_life_time_test
 
 if [ "$topology" = durable ] && [ "$capacity_issue" -eq 0 ]; then
   evidence_class="durable-multinode-restart"
