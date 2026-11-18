@@ -1005,8 +1005,8 @@ curl -H 'Authorization: Bearer demo-memory' \
     ),
     evidence: (
       <>
-        CI run <code>44206434960</code> on <code>main</code> at source{' '}
-        <code>e0f956b9</code> is the current evidence. Its{' '}
+        CI run <code>44270883958</code> on <code>main</code> at source{' '}
+        <code>e0ee93a0</code> is the current evidence. Its{' '}
         <code>serve-http-e2e</code> jobs start the built binary and drive it
         over real sockets on Linux x86_64 and arm64, macOS arm64 and Intel,
         and Windows. <code>cluster-http3</code> runs the cluster contract
@@ -1022,18 +1022,16 @@ curl -H 'Authorization: Bearer demo-memory' \
         lease in TiDB. The <code>rust</code> jobs run the transport suites
         and the OpenAPI conformance test on Linux, macOS and Windows, and{' '}
         <code>http-observability</code> runs the all-features health,
-        readiness and OTLP checks. <code>cluster-http3</code> passed on the
-        run’s second attempt. On the first, two failover tests failed closed
-        when a storage stall outlasted the 250 ms their two-second test lease
-        allowed a background renewal; the allowance now has a one-second
-        floor. Added to <code>cluster-http3</code> after this run, and so
-        far passed only in local runs: the job also partitions a Redis
-        Sentinel deployment (an old primary cut off but still accepting
-        writes, which every server stops using within about a second of the
-        promotion; a split brain in which a standby finds the lease held
-        and no drive changes owner; servers cut off from the primary or
-        from the sentinels) and logs in as ACL users holding only the
-        documented commands. Not covered: clusters of mixed releases built
+        readiness and OTLP checks. The same job partitions a Redis Sentinel deployment: an old
+        primary cut off but still accepting writes, which every server
+        stops using within about a second of the promotion; a split brain
+        in which a standby finds the lease held and no drive changes owner;
+        and servers cut off from the primary or from the sentinels. It also
+        logs in as ACL users holding only the documented commands. The
+        Windows <code>serve-http-e2e</code> job closes the server’s console
+        window, idle and with a stalled download, and checks that the
+        server stops inside the five seconds Windows allows with its lease
+        released. Every job passed on the run’s first attempt. Not covered: clusters of mixed releases built
         from two published releases; Redis Cluster, which is not supported;
         Redis hosts with different clocks; and any deployed collector,
         dashboard or pager.{' '}
@@ -1067,10 +1065,10 @@ curl -H 'Authorization: Bearer demo-memory' \
       { label: 'HTTP observability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/observability.md' },
       { label: 'Observability platform qualification', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w30.5-platform-qualification.md' },
       { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/src/server.rs' },
-      { label: 'Current CI evidence on main (run 44206434960)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960' },
-      { label: 'Cluster contract, failover and Redis Sentinel job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499827872' },
-      { label: 'Cluster of two builds job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499888571' },
-      { label: 'Binary end-to-end job, Windows', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499830114' },
+      { label: 'Current CI evidence on main (run 44270883958)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958' },
+      { label: 'Cluster contract, failover and Redis Sentinel job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958/job/134686904423' },
+      { label: 'Cluster of two builds job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958/job/134686904775' },
+      { label: 'Binary end-to-end job, Windows', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44270883958/job/134686904881' },
       { label: 'Earlier hosted HTTP observability CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35599817215' },
       { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#quick-local-demo' },
       { label: 'OpenAPI 3.1 contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/openapi.yaml' },
