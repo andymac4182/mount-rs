@@ -46,8 +46,9 @@ pub struct Security {
 }
 
 /// Parse `CLIENT LIST`: the commands of each connection from outside the
-/// container, that is from a mount-rs server (everything inside connects
-/// from a loopback address), by client id.
+/// container, that is from a mount-rs server: everything inside connects to
+/// a loopback address, and what the host sends arrives on the container's own
+/// interface, whatever its source address. By client id.
 fn host_commands(list: &str) -> BTreeMap<String, u64> {
     list.lines()
         .filter_map(|line| {
@@ -55,7 +56,7 @@ fn host_commands(list: &str) -> BTreeMap<String, u64> {
                 line.split_whitespace()
                     .find_map(|field| field.strip_prefix(name))
             };
-            if field("addr=")?.starts_with("127.") {
+            if field("laddr=")?.starts_with("127.") {
                 return None;
             }
             Some((field("id=")?.to_owned(), field("tot-cmds=")?.parse().ok()?))
@@ -290,14 +291,13 @@ impl Deployment {
     }
 
     /// The connections the server on `port` has from outside its container,
-    /// that is from mount-rs servers: everything inside connects from a
-    /// loopback address.
+    /// that is from mount-rs servers (see `host_commands`).
     pub fn host_clients(&self, port: &str) -> usize {
         self.cli(port, &["CLIENT", "LIST", "TYPE", "normal"])
             .lines()
             .filter_map(|line| {
                 line.split_whitespace()
-                    .find_map(|field| field.strip_prefix("addr="))
+                    .find_map(|field| field.strip_prefix("laddr="))
             })
             .filter(|address| !address.starts_with("127."))
             .count()
