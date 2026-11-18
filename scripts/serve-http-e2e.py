@@ -166,7 +166,8 @@ def request_stop(proc, second=False):
 # seconds later. GenerateConsoleCtrlEvent cannot raise that event, so this
 # helper does what the close button does: it finds the server's console
 # window by attaching to the console, leaves it again, and posts WM_CLOSE.
-# A console with no window (none can be created in this session) is a
+# It must be a classic console window: a console handed to a terminal (a
+# PseudoConsoleWindow) ignores WM_CLOSE. No window, or the wrong kind, is a
 # failure, not a skip.
 CONSOLE_CLOSE_HELPER = """
 import ctypes, sys
@@ -176,6 +177,7 @@ kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32.GetConsoleWindow.restype = wintypes.HWND
 user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 kernel32.FreeConsole()
 if not kernel32.AttachConsole(pid):
     sys.exit("AttachConsole failed: %d" % ctypes.get_last_error())
@@ -183,6 +185,11 @@ window = kernel32.GetConsoleWindow()
 kernel32.FreeConsole()
 if not window:
     sys.exit("the server's console has no window to close")
+kind = ctypes.create_unicode_buffer(256)
+user32.GetClassNameW(window, kind, 256)
+if kind.value != "ConsoleWindowClass":
+    sys.exit("the server's console window is a %s, which ignores WM_CLOSE; "
+             "a classic console host (conhost) is needed" % kind.value)
 WM_CLOSE = 0x0010
 if not user32.PostMessageW(window, WM_CLOSE, 0, 0):
     sys.exit("PostMessageW failed: %d" % ctypes.get_last_error())
@@ -232,8 +239,53 @@ def restart_after_close(config, what):
     return proc
 
 
+# The console host a new console gets, for this user. GitHub's Windows
+# runners hand new consoles to a pseudo-console terminal, whose window
+# ignores WM_CLOSE; this GUID selects the classic console host instead.
+CONHOST = "{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}"
+CONSOLE_STARTUP = r"Console\%%Startup"
+
+
+def classic_console_host():
+    """On a CI runner only: give new consoles the classic console host.
+
+    Returns a function that puts the previous setting back. Elsewhere the
+    user's own setting is left alone, and the helper fails if the console
+    window it finds is not a classic one.
+    """
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return lambda: None
+    import winreg
+    names = ("DelegationConsole", "DelegationTerminal")
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CONSOLE_STARTUP) as key:
+        before = {}
+        for name in names:
+            try:
+                before[name] = winreg.QueryValueEx(key, name)[0]
+            except FileNotFoundError:
+                before[name] = None
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, CONHOST)
+
+    def restore():
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CONSOLE_STARTUP) as key:
+            for name, value in before.items():
+                if value is None:
+                    winreg.DeleteValue(key, name)
+                else:
+                    winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+    return restore
+
+
 def console_close(config):
     """Windows: close the server's console, idle and then mid-request."""
+    restore = classic_console_host()
+    try:
+        console_close_checks(config)
+    finally:
+        restore()
+
+
+def console_close_checks(config):
     global PORT
     proc, PORT = start(config)
     marker = os.urandom(50_000)

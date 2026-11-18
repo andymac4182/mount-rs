@@ -578,7 +578,11 @@ posting `WM_CLOSE` to it, once with the server idle and once with an upload
 stalled half-way under a 60-second drain limit. Both times it checks the
 exit code, that the process exited within 5 seconds of the close, that an
 immediate restart on the same storage starts (so the writer lease was
-released), and that data written before the close is intact. System
+released), and that data written before the close is intact. The console
+is one of the classic console host (conhost): the job sets the runner's
+user to it, because the runner otherwise hands new consoles to a
+pseudo-console terminal whose window ignores `WM_CLOSE`. Closing a Windows
+Terminal tab that runs the server is not tested. System
 shutdown is not tested: it is only delivered when Windows really shuts
 down. A unit test checks that a shutdown event takes the same path as a
 console close and that logoff is not a stop, so only the delivery of the

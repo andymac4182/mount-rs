@@ -124,7 +124,8 @@ Windows limits:
   (exit 0, `http stopped`) and with an upload stalled under a 60-second
   drain limit (exit 1 by itself, not ended by Windows); both times within
   5 seconds, with the writer lease released for an immediate restart and
-  earlier data intact.
+  earlier data intact. The window is a classic console host (conhost)
+  window; closing a Windows Terminal tab is not tested.
 - System shutdown is not tested: Windows delivers it only when it really
   shuts down. A unit test checks that it takes the same path as a console
   close, so only its delivery is untested.
