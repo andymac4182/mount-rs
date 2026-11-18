@@ -15,6 +15,12 @@ import {
   withTimeout,
 } from "./errors.mjs"
 import {
+  flushHostWriteback,
+  hostConditionsDelta,
+  readHostConditions,
+  slowestOperations,
+} from "./host.mjs"
+import {
   loadedNativeAddonPaths,
   mountxSourcePath,
   MOUNTX_PINNED_REVISION,
@@ -86,6 +92,7 @@ export function parseArgs(argv) {
   let payloadBytes
   let minIops
   let requireConfigured = false
+  let flushWriteback = false
   let help = false
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -129,6 +136,9 @@ export function parseArgs(argv) {
       case "--require-configured":
         requireConfigured = true
         break
+      case "--flush-writeback":
+        flushWriteback = true
+        break
       case "--providers":
       case "--provider":
         providers = takeValue(argv, index++, argument)
@@ -168,6 +178,7 @@ export function parseArgs(argv) {
     payloadBytes,
     minIops,
     requireConfigured,
+    flushWriteback,
   }
 }
 
@@ -191,6 +202,8 @@ Options:
   --payload-bytes N         override the generated payload size for each lifecycle
   --min-iops N              fail a result below the successful lifecycle IOPS target
   --require-configured      fail when any requested provider is not configured
+  --flush-writeback         run sync before each timed window, so it does not
+                            pay for writeback of what earlier steps wrote
   --output PATH             also write machine-readable JSON to PATH
   --payload-seed TEXT       deterministic payload seed
   --network-context TEXT    recorded remote network context
@@ -262,6 +275,9 @@ function emptySample(definition, sizeBytes, iteration, path) {
     iteration,
     path,
     status: "failed",
+    writeStartedAtMs: null,
+    readStartedAtMs: null,
+    deleteStartedAtMs: null,
     writeMs: null,
     readMs: null,
     uploadMs: null,
@@ -411,13 +427,18 @@ export async function runSample({
   options,
   ownedPaths,
   pendingOperations,
+  measurementStarted = null,
 }) {
   const sample = emptySample(definition, payload.byteLength, iteration, path)
   ownedPaths.add(path)
+  // Offsets from the start of the timed window, so a stall shows up as
+  // operations that started apart and ended together.
+  const offset = (time) => (measurementStarted === null ? null : time - measurementStarted)
 
   let writeCompleted = false
   let operationPending = false
   const writeStarted = performance.now()
+  sample.writeStartedAtMs = offset(writeStarted)
   try {
     await withTimeout(() => filesystem.writeFile(path, payload), options.timeoutMs, "write")
     sample.writeMs = performance.now() - writeStarted
@@ -442,6 +463,7 @@ export async function runSample({
 
   if (writeCompleted) {
     const readStarted = performance.now()
+    sample.readStartedAtMs = offset(readStarted)
     try {
       const returned = bytes(await withTimeout(() => filesystem.readFile(path), options.timeoutMs, "read"))
       sample.readMs = performance.now() - readStarted
@@ -475,6 +497,7 @@ export async function runSample({
     if (operationPending) return finishSample(sample, payload)
 
     const deleteStarted = performance.now()
+    sample.deleteStartedAtMs = offset(deleteStarted)
     try {
       await withTimeout(() => filesystem.unlink(path), options.cleanupTimeoutMs, "delete")
       sample.deleteMs = performance.now() - deleteStarted
@@ -538,6 +561,8 @@ async function runSize(
   ownedPaths,
   pendingOperations,
 ) {
+  const preMeasurement = options.flushWriteback ? await flushHostWriteback() : null
+  const hostBefore = await readHostConditions()
   const measurementStarted = performance.now()
   const sizeBytes = payload.byteLength
   const tasks = Array.from({ length: options.iterations }, (_, index) => ({
@@ -554,6 +579,7 @@ async function runSize(
       options,
       ownedPaths,
       pendingOperations,
+      measurementStarted,
     }).then((sample) => ({ ...sample, concurrencySlot: slot })),
   )
 
@@ -569,12 +595,34 @@ async function runSize(
   const timeoutCount = samples.reduce((total, sample) => total + sample.timeoutCount, 0)
   const cleanupFailureCount = samples.filter((sample) => sample.cleanupFailure).length
   const elapsedMs = performance.now() - measurementStarted
+  const hostConditions = hostConditionsDelta(hostBefore, await readHostConditions())
+  const slowest = slowestOperations(samples)
   const operationsPerLifecycle = 3
   const successfulOperations = successfulIterations * operationsPerLifecycle
   const attemptedOperations = samples.length * operationsPerLifecycle
   const iops = elapsedMs > 0 ? successfulOperations / (elapsedMs / 1000) : 0
   const iopsTargetMet = options.minIops == null ? null : iops >= options.minIops
   const iopsTargetFailure = iopsTargetMet === false
+  if (iopsTargetFailure) {
+    // One line in the log with what the next investigation needs: when the
+    // slowest operations ran, and whether the host itself stalled meanwhile.
+    process.stderr.write(
+      `STORAGE_IOPS_SLOW provider=${definition.id} iops=${iops.toFixed(2)} ` +
+        `elapsedMs=${elapsedMs.toFixed(1)} ` +
+        `ioFullStallMs=${hostConditions.ioFullStallMs ?? "n/a"} ` +
+        `ioSomeStallMs=${hostConditions.ioSomeStallMs ?? "n/a"} ` +
+        `cpuSomeStallMs=${hostConditions.cpuSomeStallMs ?? "n/a"} ` +
+        `dirtyKiBBefore=${hostConditions.dirtyKiBBefore ?? "n/a"} ` +
+        `preSyncMs=${preMeasurement?.syncMs?.toFixed(1) ?? "not-run"} slowest=` +
+        slowest
+          .map(
+            (entry) =>
+              `${entry.operation}#${entry.iteration}@${entry.startedAtMs.toFixed(0)}+${entry.ms.toFixed(0)}`,
+          )
+          .join(",") +
+        "\n",
+    )
+  }
   const summary = {
     writeMs: computeStats(writeValues),
     readMs: computeStats(readValues),
@@ -638,6 +686,9 @@ async function runSize(
           ],
         }
       : {}),
+    preMeasurement,
+    hostConditions,
+    slowestOperations: slowest,
     summary,
     summaryRounded: {
       writeMs: roundStats(summary.writeMs),
@@ -1039,6 +1090,7 @@ export async function runBenchmark(options, environment = process.env) {
       payloadBytes: options.payloadBytes ?? null,
       minIops: options.minIops ?? null,
       requireConfigured: options.requireConfigured,
+      flushWriteback: options.flushWriteback === true,
       iopsDefinition: "successful write+read+delete lifecycle operations divided by measured lifecycle wall time",
       payloadSeed: options.payloadSeed,
       setupExcludedFromTimings: true,
