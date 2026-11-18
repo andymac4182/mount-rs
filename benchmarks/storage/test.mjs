@@ -16,6 +16,14 @@ import {
   usageError,
   withTimeout,
 } from "./errors.mjs"
+import {
+  flushHostWriteback,
+  hostConditionsDelta,
+  parseMeminfo,
+  parsePressure,
+  readHostConditions,
+  slowestOperations,
+} from "./host.mjs"
 import { providerById, providerSummary } from "./providers.mjs"
 import { cleanupOwnedPaths, parseArgs, runBenchmark, runSample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
@@ -134,6 +142,162 @@ async function testDeferredWriteCleanup() {
   assert.deepEqual(cleanup.failures, [])
 }
 
+const PSI_IO = (some, full) =>
+  `some avg10=0.00 avg60=0.00 avg300=0.00 total=${some}\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=${full}\n`
+const MEMINFO = (dirty, writeback) =>
+  `MemTotal:       16000000 kB\nDirty:          ${dirty} kB\nWriteback:      ${writeback} kB\nWritebackTmp:          0 kB\n`
+
+function fakeProc(files) {
+  return async (path) => {
+    if (!(path in files)) throw Object.assign(new Error("absent"), { code: "ENOENT" })
+    return files[path]
+  }
+}
+
+async function testHostConditions() {
+  assert.deepEqual(parsePressure(PSI_IO(1500, 900)), { some: 1500, full: 900 })
+  // The cpu file has no full line on older kernels.
+  assert.deepEqual(parsePressure("some avg10=1.00 avg60=0.00 avg300=0.00 total=42\n"), {
+    some: 42,
+    full: null,
+  })
+  assert.deepEqual(parseMeminfo(MEMINFO(524288, 1024)), { dirtyKiB: 524288, writebackKiB: 1024 })
+
+  const before = await readHostConditions(
+    fakeProc({
+      "/proc/pressure/io": PSI_IO(1_000_000, 500_000),
+      "/proc/pressure/cpu": PSI_IO(10_000, 0),
+      "/proc/meminfo": MEMINFO(800_000, 2_000),
+    }),
+  )
+  const after = await readHostConditions(
+    fakeProc({
+      "/proc/pressure/io": PSI_IO(2_400_000, 1_700_000),
+      "/proc/pressure/cpu": PSI_IO(30_000, 0),
+      "/proc/meminfo": MEMINFO(4_000, 0),
+    }),
+  )
+  const delta = hostConditionsDelta(before, after)
+  assert.equal(delta.ioSomeStallMs, 1400)
+  assert.equal(delta.ioFullStallMs, 1200)
+  assert.equal(delta.cpuSomeStallMs, 20)
+  // Memory pressure was unreadable at both ends: unknown, not zero.
+  assert.equal(delta.memorySomeStallMs, null)
+  assert.equal(delta.dirtyKiBBefore, 800_000)
+  assert.equal(delta.dirtyKiBAfter, 4_000)
+
+  // Off Linux nothing is readable and nothing is invented.
+  const none = await readHostConditions(fakeProc({}))
+  assert.deepEqual(hostConditionsDelta(none, none).ioFullStallMs, null)
+  assert.equal(none.dirtyKiB, null)
+
+  // The flush syncs once, between two readings, and reports what it drained.
+  let reads = 0
+  let syncs = 0
+  let clock = 0
+  const flushed = await flushHostWriteback({
+    read: async (path) => {
+      reads += 1
+      const drained = syncs > 0
+      if (path === "/proc/meminfo") return drained ? MEMINFO(2_000, 0) : MEMINFO(900_000, 8_000)
+      if (path === "/proc/pressure/io") {
+        return drained ? PSI_IO(3_000_000, 2_250_000) : PSI_IO(1_000_000, 750_000)
+      }
+      throw Object.assign(new Error("absent"), { code: "ENOENT" })
+    },
+    sync: async () => {
+      syncs += 1
+      clock += 1500
+    },
+    now: () => clock,
+  })
+  assert.equal(syncs, 1)
+  assert.ok(reads > 0)
+  assert.equal(flushed.status, "ok")
+  assert.equal(flushed.syncMs, 1500)
+  assert.equal(flushed.ioFullStallMsDuringSync, 1500)
+  assert.equal(flushed.dirtyKiBBefore, 900_000)
+  assert.equal(flushed.dirtyKiBAfter, 2_000)
+
+  // A failed sync is recorded, not hidden and not fatal to the measurement.
+  const failed = await flushHostWriteback({
+    read: fakeProc({}),
+    sync: async () => {
+      throw Object.assign(new Error("sync missing"), { code: "ENOENT" })
+    },
+  })
+  assert.equal(failed.status, "failed")
+  assert.equal(failed.error.code, "ENOENT")
+
+  // A stall that holds a whole batch shows up as the slowest operations,
+  // with their start offsets.
+  const samples = [
+    { iteration: 1, writeStartedAtMs: 0, writeMs: 30, readStartedAtMs: 30, readMs: 1, deleteStartedAtMs: 31, deleteMs: 4 },
+    { iteration: 2, writeStartedAtMs: 0, writeMs: 949, readStartedAtMs: 949, readMs: 2, deleteStartedAtMs: 951, deleteMs: 608 },
+    { iteration: 3, writeStartedAtMs: 0, writeMs: 380, readStartedAtMs: 380, readMs: 2, deleteStartedAtMs: 383, deleteMs: 1036 },
+    // A write that failed has no read or delete timing.
+    { iteration: 4, writeStartedAtMs: 0, writeMs: 5, readStartedAtMs: null, readMs: null, deleteStartedAtMs: null, deleteMs: null },
+  ]
+  const slowest = slowestOperations(samples, 3)
+  assert.deepEqual(
+    slowest.map(({ iteration, operation, startedAtMs, endedAtMs }) => [iteration, operation, startedAtMs, endedAtMs]),
+    [
+      [3, "delete", 383, 1419],
+      [2, "write", 0, 949],
+      [2, "delete", 951, 1559],
+    ],
+  )
+  // Ten timed operations in all; the default keeps the slowest eight.
+  assert.equal(slowestOperations(samples, 100).length, 10)
+  assert.equal(slowestOperations(samples).length, 8)
+}
+
+async function testSampleStartOffsets() {
+  const files = new Set()
+  const filesystem = {
+    async writeFile(path) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      files.add(path)
+    },
+    async readFile() {
+      return Buffer.from("payload")
+    },
+    async unlink(path) {
+      files.delete(path)
+    },
+  }
+  const measurementStarted = performance.now() - 100
+  const sample = await runSample({
+    definition: { id: "injected-offsets" },
+    filesystem,
+    payload: Buffer.from("payload"),
+    path: "/offsets",
+    iteration: 1,
+    options: { timeoutMs: 1_000, cleanupTimeoutMs: 1_000 },
+    ownedPaths: new Set(),
+    pendingOperations: new Map(),
+    measurementStarted,
+  })
+  assert.equal(sample.status, "ok")
+  assert.ok(sample.writeStartedAtMs >= 100, `write offset ${sample.writeStartedAtMs}`)
+  assert.ok(sample.readStartedAtMs >= sample.writeStartedAtMs + sample.writeMs)
+  assert.ok(sample.deleteStartedAtMs >= sample.readStartedAtMs + sample.readMs)
+
+  // Without a window origin the offsets stay unknown.
+  const unanchored = await runSample({
+    definition: { id: "injected-offsets" },
+    filesystem,
+    payload: Buffer.from("payload"),
+    path: "/offsets-unanchored",
+    iteration: 1,
+    options: { timeoutMs: 1_000, cleanupTimeoutMs: 1_000 },
+    ownedPaths: new Set(),
+    pendingOperations: new Map(),
+  })
+  assert.equal(unanchored.writeStartedAtMs, null)
+  assert.equal(unanchored.deleteStartedAtMs, null)
+}
+
 async function testCli() {
   assert.deepEqual(parseArgs(["--smoke"]).sizes, [1])
   assert.deepEqual(parseArgs(["--sizes", "1,4MiB,10MB,16", "--iterations", "3", "--concurrency", "2"]), {
@@ -152,6 +316,7 @@ async function testCli() {
     payloadBytes: undefined,
     minIops: undefined,
     requireConfigured: false,
+    flushWriteback: false,
   })
   assert.deepEqual(parseArgs(["--smoke", "--providers", "mount-rs-memory,mountx-memory"]).providers, [
     "mount-rs-memory",
@@ -160,6 +325,7 @@ async function testCli() {
   assert.equal(parseArgs(["--payload-bytes", "4096", "--min-iops", "1000"]).payloadBytes, 4096)
   assert.equal(parseArgs(["--payload-bytes", "4096", "--min-iops", "1000"]).minIops, 1000)
   assert.equal(parseArgs(["--require-configured"]).requireConfigured, true)
+  assert.equal(parseArgs(["--flush-writeback"]).flushWriteback, true)
   assert.throws(() => parseArgs(["--iterations", "0"]), /positive integer/)
   assert.throws(() => parseArgs(["--unknown"]), /unknown argument/)
 }
@@ -584,4 +750,6 @@ await testW26WorkflowKeepsProvenanceClean()
 await testExecutionSurfaceLabels()
 await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()
+await testHostConditions()
+await testSampleStartOffsets()
 console.log("storage benchmark unit tests: PASS")
