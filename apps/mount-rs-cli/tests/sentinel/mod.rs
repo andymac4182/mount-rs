@@ -273,7 +273,10 @@ impl Deployment {
 
     /// The port of the primary the sentinel on `port` names, if it names one.
     pub fn named_by(&self, port: &str) -> Option<String> {
-        let reply = self.cli(port, &["SENTINEL", "GET-MASTER-ADDR-BY-NAME", &self.service]);
+        let reply = self.cli(
+            port,
+            &["SENTINEL", "GET-MASTER-ADDR-BY-NAME", &self.service],
+        );
         reply.lines().nth(1).map(|line| line.trim().to_owned())
     }
 
@@ -339,7 +342,10 @@ impl Deployment {
 
     /// `host:port` of the sentinels on `ports`, for a server's configuration.
     pub fn sentinel_addresses(&self, ports: &[&str]) -> Vec<String> {
-        ports.iter().map(|port| format!("127.0.0.1:{port}")).collect()
+        ports
+            .iter()
+            .map(|port| format!("127.0.0.1:{port}"))
+            .collect()
     }
 
     pub fn primary(&self) -> String {
@@ -617,4 +623,3 @@ pub fn write_settled(server: &Server, name: &str, body: &[u8]) -> Duration {
         },
     )
 }
-

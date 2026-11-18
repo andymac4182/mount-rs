@@ -491,7 +491,11 @@ fn acl_users_with_only_the_documented_rules_are_enough() {
 
     // Nothing the servers sent was refused, on any Redis server or sentinel
     // still running.
-    for port in deployment.data_ports.iter().chain(&deployment.sentinel_ports) {
+    for port in deployment
+        .data_ports
+        .iter()
+        .chain(&deployment.sentinel_ports)
+    {
         if *port != first {
             assert_eq!(refused(port), "", "ACL LOG on {port}");
         }

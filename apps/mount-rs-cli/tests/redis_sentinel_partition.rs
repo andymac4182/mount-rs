@@ -309,7 +309,10 @@ fn the_lease_holds_when_an_owner_and_a_standby_see_different_primaries() {
     let promoted = cut.elapsed();
     // The minority sentinel still names the old primary, which still
     // believes it is the primary: two primaries.
-    assert_eq!(deployment.named_by(&minority).as_deref(), Some(old.as_str()));
+    assert_eq!(
+        deployment.named_by(&minority).as_deref(),
+        Some(old.as_str())
+    );
     assert_eq!(deployment.role(&old), "master");
 
     // a's route on the new primary is the replicated copy, which nothing
@@ -441,7 +444,13 @@ fn servers_cut_off_from_the_primary_but_not_from_the_sentinels() {
         Duration::from_secs(60),
         || {
             matches!(
-                http_within(ingress.address, "GET", "before", b"", Duration::from_secs(15)),
+                http_within(
+                    ingress.address,
+                    "GET",
+                    "before",
+                    b"",
+                    Duration::from_secs(15)
+                ),
                 Ok((503, _))
             )
         },
@@ -470,9 +479,11 @@ fn servers_cut_off_from_the_primary_but_not_from_the_sentinels() {
 
     deployment.heal();
     let healed = Instant::now();
-    wait_until("the route to be published again", REDIS_FAILOVER_LIMIT, || {
-        deployment.route(&primary, &cluster.namespace) == Some(published.clone())
-    });
+    wait_until(
+        "the route to be published again",
+        REDIS_FAILOVER_LIMIT,
+        || deployment.route(&primary, &cluster.namespace) == Some(published.clone()),
+    );
     let republished = healed.elapsed();
     write_settled(&ingress, "after", b"written after");
     let forwarding = healed.elapsed();
@@ -492,9 +503,7 @@ fn servers_cut_off_from_the_primary_but_not_from_the_sentinels() {
          cut; cut for {cut_for:.1?}, {} forwarded reads refused and none served meanwhile; \
          direct reads: {} served, longest gap {:.1?}; after the heal the route was back in \
          {republished:.1?} and a forwarded write succeeded after {forwarding:.1?}",
-        during.unavailable,
-        direct.ok,
-        direct.longest_gap
+        during.unavailable, direct.ok, direct.longest_gap
     );
 }
 
@@ -560,7 +569,13 @@ fn servers_that_reach_only_the_old_primary() {
         Duration::from_secs(60),
         || {
             matches!(
-                http_within(ingress.address, "GET", "before", b"", Duration::from_secs(15)),
+                http_within(
+                    ingress.address,
+                    "GET",
+                    "before",
+                    b"",
+                    Duration::from_secs(15)
+                ),
                 Ok((503, _))
             )
         },
