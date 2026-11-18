@@ -358,7 +358,18 @@ goes to that one connection. A replica is never read or written.
   the sentinels name another address, or that the connected server no
   longer reports `master`. A demoted primary keeps answering reads, so this
   check is what moves a server that only reads (an ingress, a standby). A
-  check that cannot reach a sentinel changes nothing.
+  check that cannot reach a sentinel changes nothing (the `ROLE` half of it
+  still runs).
+- A command sent more than two seconds after the last check began waits
+  up to half a second for a new check before it is sent. Without this, a
+  connection left idle while its server was cut off or demoted was used
+  once more on trust: an owner's route refresh (every 5 s) went to an
+  isolated old primary once after the sentinels had named another, and a
+  registry connection that had not been used at all kept pointing at the
+  old primary indefinitely, so its first read could come from the cut-off
+  server or, after the heal, from a replica. If the check cannot finish in
+  half a second (no sentinel answers), the command is sent on the
+  connection it has, as before.
 
 The command that met the failure is not sent again. Its caller sees an
 unavailable registry and does what it does in any Redis outage: an owner
@@ -410,17 +421,41 @@ owner's route or announcement for that much longer than 15 s. Keep the
 Redis hosts' clocks together (NTP is enough). Not tested: the test
 deployment runs on one host.
 
-**An old primary that is cut off but still running.** Until it learns that
-it was replaced, it accepts writes that will be discarded. A server that
-can still reach it, and a sentinel that names another primary, leaves it
-within about a second (the periodic check). A server that can reach only
-the old primary and sentinels that still name it keeps publishing there,
-where the rest of the cluster does not look: its drives get `503` through
-the other servers and stay served on its own listener, exactly as for an
-owner cut off from Redis. There is still one writer, because the lease is
-in storage. Redis's own `min-replicas-to-write` shortens this window. **Not
-tested:** a partition of the Redis deployment. The tests kill the primary
-and later start it again.
+**Partitions inside the Redis deployment.** Tested with real processes by
+`apps/mount-rs-cli/tests/redis_sentinel_partition.rs`. The fixture
+(`scripts/redis-sentinel-fixture.sh` with
+`MOUNT_RS_SENTINEL_FIXTURE_PARTITION=1`) runs the six Redis processes in one
+container, each making its connections from its own loopback address, and
+drops packets with iptables from a second container that shares the
+network namespace: established connections go silent, as in a real
+partition. Links between Redis processes are cut individually; the host,
+and so every mount-rs server at once, can be cut off from any of them.
+
+| Partition | What happens | Measured |
+| --- | --- | --- |
+| The old primary cut off from the sentinels and both replicas, still reachable by every server, still accepting writes | The sentinels promote a replica. Every server stops sending commands to the old primary within about a second of the promotion (the periodic check, or the check before an overdue command) and the owner's route is on the new primary. Nothing a server wrote to the old primary alone is kept: when the link returns the sentinels make it a replica and it resynchronises from the new primary, dropping its own writes. A route record with a later fence naming another node, put on the isolated old primary by the test after the servers had left, was never read (an owner without failover that read it would stop) and was gone after the resync. No server went back to the old primary. The route's fence never changed. | Promotion 4.3 to 4.7 s after the cut; last command from a server to the old primary 0.2 s after the promotion; route on the new primary 4.6 s after the cut; after the heal, a replica in 10.5 to 11.2 s and its own writes gone in 15.4 to 16.6 s. Every forwarded and direct read was served (longest gap 0.13 s). |
+| Split brain: the old primary with one sentinel on one side, both replicas with two sentinels (a quorum and a majority) on the other; the owner can reach only the lone sentinel, the standby and an ingress only the other two | Two primaries. The owner keeps publishing on the old one, where its record stays fresh. On the new one the replicated route lapses and nothing replaces it: the standby reads "no route", opens the drive, gets `EAGAIN` (`lease_held`) and never takes it. Forwarded requests on the majority side get `503` not-dispatched; requests to the owner are all served. The lease owner and fence never change. After the heal the owner's sentinel names the new primary, the owner moves there and publishes its route under the same fence, and forwarding resumes. | Promotion 4.5 s after the cut; route lapsed on the new primary 11.7 s after the cut; `lease_held` 0.1 s later; split held 27 s; after the heal, the owner's route on the new primary and forwarding back in 4.5 s. Forwarded reads went up to 20 s without an answer (all `503`). |
+| The servers cut off from the primary; the sentinels and replicas are not, so no failover | A Redis outage for the servers, as under "Redis outages": the owner keeps serving its drive, forwarded requests get `503`, the owner's unrefreshed route expires on the primary, nobody exits. When the link returns the owner publishes again on the same primary. | Forwarded requests refused 0.5 s after the cut; route back 0.14 s after the heal. |
+| The servers can reach only the old primary (not the sentinels), and the old primary is cut off from the rest | The servers keep using the old primary: a check that cannot reach a sentinel is no evidence. All of them use the same server, so forwarding keeps working through it while the sentinels promote another. When the old primary rejoins and becomes a replica, the servers stop using it (its `ROLE`); with no sentinel reachable they have no primary and forwarded requests get `503`. When the sentinels are reachable again the servers find the new primary. | Forwarding through the old primary worked throughout the split; after it became a replica, forwarded requests were refused within 2.3 s; with the sentinels back, the route was on the new primary in 0.9 s. |
+
+A server that can reach only the old primary while *other* servers follow
+the sentinels is the split-brain row: the two groups read different
+registries. Requests are never served by a server that does not hold the
+lease, because the lease is in storage; what the split costs is
+availability (`503`) on the side whose registry lacks the route, for as
+long as the split lasts. Redis's own `min-replicas-to-write` makes a
+primary that has lost its replicas refuse writes, which turns the owner's
+side into an outage instead; it is not tested here.
+
+Not tested: the reverse split (the owner on the majority side and a
+standby on the minority side with the old primary), which by the same
+reasoning leaves the standby reading the owner's lapsed route and finding
+the lease held; an owner that dies *during* a split, whose successor's
+route on one side is lost when the sides merge (the predecessor-record row
+of the table above then applies); and a partition between mount-rs
+servers and only some of the sentinels other than by giving a server a
+shorter sentinel list, which is how the split-brain test cuts each server
+off. The host-side cut applies to every server at once.
 
 **Measured** by `apps/mount-rs-cli/tests/redis_sentinel.rs` with real
 servers, Redis 8.4, one primary, two replicas and three sentinels
@@ -441,6 +476,10 @@ laptop, over seven runs, with and without TLS and passwords:
 
 The old primary, started again, was reconfigured as a replica by the
 sentinels and no server returned to it.
+
+The partition figures above are from one run of each test on a laptop
+(Docker Desktop, Redis 8.4, the same deployment shape); each test was run
+at least twice.
 
 ## What clients see
 
