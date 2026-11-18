@@ -1005,29 +1005,30 @@ curl -H 'Authorization: Bearer demo-memory' \
     ),
     evidence: (
       <>
-        CI run <code>44141640175</code> on <code>main</code> at source{' '}
-        <code>031050cc</code> is the current evidence. Its{' '}
+        CI run <code>44206434960</code> on <code>main</code> at source{' '}
+        <code>e0f956b9</code> is the current evidence. Its{' '}
         <code>serve-http-e2e</code> jobs start the built binary and drive it
         over real sockets on Linux x86_64 and arm64, macOS arm64 and Intel,
         and Windows. <code>cluster-http3</code> runs the cluster contract
-        against a real Redis: forwarding, remote sessions, membership reload
-        and drive failover, including a crashed owner replaced only after its
-        storage lease expires. <code>tidb-rustfs</code> repeats failover with
-        the lease in TiDB. The <code>rust</code> jobs run the transport
-        suites and the OpenAPI conformance test, and{' '}
+        against a real Redis: forwarding, remote sessions, membership reload,
+        token-file rotation and metrics on an owner, an ingress and a
+        failover standby, and drive failover, including a crashed owner
+        replaced only after its storage lease expires. The same job kills
+        the primary of a Redis Sentinel deployment with two replicas and
+        three sentinels under real servers, with and without TLS and
+        passwords. <code>cluster-mixed-release</code> runs the cluster test
+        with servers on the current commit and on <code>031050cc</code>, in
+        both directions. <code>tidb-rustfs</code> repeats failover with the
+        lease in TiDB. The <code>rust</code> jobs run the transport suites
+        and the OpenAPI conformance test on Linux, macOS and Windows, and{' '}
         <code>http-observability</code> runs the all-features health,
-        readiness and OTLP checks. The workspace test job on macOS arm64
-        passed on the run’s second attempt, after no hosted runner picked it
-        up on the first. That run predates the <code>cluster-mixed-release</code>{' '}
-        job, which runs the cluster test with one server on the current
-        commit and one on <code>031050cc</code>. Not covered: clusters of mixed releases built from
-        two published releases; Redis Cluster, which is not supported; a
+        readiness and OTLP checks. <code>cluster-http3</code> passed on the
+        run’s second attempt: on the first, two failover tests each lost a
+        two-second test lease at the same moment, which did not reproduce
+        in fourteen local runs. Not covered: clusters of mixed releases
+        built from two published releases; Redis Cluster, which is not supported; a
         network partition inside a Redis Sentinel deployment; and any
-        deployed collector, dashboard or pager. That run also predates the
-        Redis Sentinel step of <code>cluster-http3</code>, which kills the
-        primary of a deployment with two replicas and three sentinels under
-        real servers, with and without TLS and passwords; it has passed
-        locally and has no hosted run yet.{' '}
+        deployed collector, dashboard or pager.{' '}
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,
         ranges, truncate, concurrent writes, restart/reopen, and cleanup. The
         optional <code>mount-rs-observability</code> seam can attach a
@@ -1058,9 +1059,10 @@ curl -H 'Authorization: Bearer demo-memory' \
       { label: 'HTTP observability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/observability.md' },
       { label: 'Observability platform qualification', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w30.5-platform-qualification.md' },
       { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/src/server.rs' },
-      { label: 'Current CI evidence on main (run 44141640175)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175' },
-      { label: 'Cluster contract, forwarding and failover job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245707825' },
-      { label: 'Binary end-to-end job, Windows', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44141640175/job/134245706441' },
+      { label: 'Current CI evidence on main (run 44206434960)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960' },
+      { label: 'Cluster contract, failover and Redis Sentinel job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499827872' },
+      { label: 'Cluster of two builds job', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499888571' },
+      { label: 'Binary end-to-end job, Windows', href: 'https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499830114' },
       { label: 'Earlier hosted HTTP observability CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35599817215' },
       { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/apps/mount-rs-cli/README.md#quick-local-demo' },
       { label: 'OpenAPI 3.1 contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-http/openapi.yaml' },
