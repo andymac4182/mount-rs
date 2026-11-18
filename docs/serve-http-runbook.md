@@ -1472,8 +1472,8 @@ design):
 
 - **An old primary cut off from the sentinels and replicas, but still
   reachable and still accepting writes:** every server stops using it
-  within about a second of the sentinels promoting a replica (0.2 s in the
-  test). What was written to it alone is discarded when it rejoins as a
+  within about a second of the sentinels promoting a replica (no later
+  than 0.2 s after it in the test). What was written to it alone is discarded when it rejoins as a
   replica, and is never read meanwhile.
 - **Split brain** (some servers can reach only a sentinel left with the old
   primary, others only the sentinels that promoted a replica): the two
@@ -1483,7 +1483,7 @@ design):
   there get `503`, and a standby there tries the drive and gets `EAGAIN`
   (`lease_held`): the lease in storage keeps one owner. No drive changed
   owner and no fence changed in the test. Routes converge within a
-  refresh interval of the heal (4.5 s in the test). List every sentinel on
+  refresh interval of the heal (4.4 to 4.5 s in the test). List every sentinel on
   every server, so that a server is cut off from the majority only when
   the network really cuts it off.
 - **Servers cut off from the primary while the sentinels are not:** a
