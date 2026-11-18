@@ -226,6 +226,10 @@ CI on Linux, durable topology, by manual dispatch of the CI workflow
 | `tidb` | `e0f956b9` (`main` after #156) | Pass: `TIDB_ACCEPTANCE evidence=durable-multinode-restart`; the autocommit conflict tests, with `ERROR 1213` in each of three deadlock rounds | [44206434960 / 134499868948](https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499868948) |
 | `tidb-tls`, `tidb-tls-compile`, `tidb-rustfs` | `e0f956b9` | Pass | [44206434960](https://github.com/andymac4182/mount-rs/actions/runs/44206434960) |
 | `ozone-tidb` | `e0f956b9` | Pass: 3,624 IOPS against the 1,000 target | [44206434960 / 134499894374](https://github.com/andymac4182/mount-rs/actions/runs/44206434960/job/134499894374) |
+| `tidb` | `e6bf1ea7` (#164 before merge) | Pass: `TIDB_CRASH_RESTART_PASS topology=durable` after every PD, TiKV and TiDB container was killed at once, then `TIDB_ACCEPTANCE evidence=durable-multinode-restart` | [44252877749 / 134628774306](https://github.com/andymac4182/mount-rs/actions/runs/44252877749/job/134628774306) |
+| `tidb-rustfs` | `e6bf1ea7` | Pass: `TIDB_CRASH_RESTART_PASS topology=durable`; two `TIDB_SQLITE_MOUNT_CRASH_PASS` (TiDB blocks and RustFS blocks), each with 8 committed transactions per database, the kill inside `BEGIN DELETE 9`, `integrity=ok`, and 15 and 14 refused remounts before the lease expired | [44252877749 / 134628775110](https://github.com/andymac4182/mount-rs/actions/runs/44252877749/job/134628775110) |
+| `tidb-gc-life-time` | `e6bf1ea7` | Pass: `TIDB_GC_LIFE_TIME_PASS code=9006 classification=unknown-outcome committed=false elapsed_seconds=1320`; the job took 24 min 22 s | [44252877749 / 134628774351](https://github.com/andymac4182/mount-rs/actions/runs/44252877749/job/134628774351) |
+| `tidb-tls`, `ozone-tidb` | `e6bf1ea7` | Pass | [44252877749](https://github.com/andymac4182/mount-rs/actions/runs/44252877749) |
 
 Run 44141640175 was a manual dispatch on `main`. The push run for the next
 commit, `d69d11f0`
