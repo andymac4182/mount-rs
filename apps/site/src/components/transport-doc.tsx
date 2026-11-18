@@ -1023,9 +1023,10 @@ curl -H 'Authorization: Bearer demo-memory' \
         and the OpenAPI conformance test on Linux, macOS and Windows, and{' '}
         <code>http-observability</code> runs the all-features health,
         readiness and OTLP checks. <code>cluster-http3</code> passed on the
-        run’s second attempt: on the first, two failover tests each lost a
-        two-second test lease at the same moment, which did not reproduce
-        in fourteen local runs. Not covered: clusters of mixed releases
+        run’s second attempt. On the first, two failover tests failed closed
+        when a storage stall outlasted the 250 ms their two-second test lease
+        allowed a background renewal; the allowance now has a one-second
+        floor. Not covered: clusters of mixed releases
         built from two published releases; Redis Cluster, which is not supported; a
         network partition inside a Redis Sentinel deployment; and any
         deployed collector, dashboard or pager.{' '}
