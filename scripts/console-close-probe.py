@@ -1,0 +1,114 @@
+"""Temporary probe: which way of closing a console delivers CTRL_CLOSE_EVENT here."""
+import ctypes
+import os
+import subprocess
+import sys
+import time
+import winreg
+from ctypes import wintypes
+
+CHILD = r"""
+import ctypes, sys, time
+log = sys.argv[1]
+def handler(event):
+    with open(log, "a") as f:
+        f.write("event %d\n" % event)
+    time.sleep(1)
+    return 1
+cb = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)(handler)
+k = ctypes.WinDLL("kernel32")
+k.SetConsoleCtrlHandler(None, 0)
+k.SetConsoleCtrlHandler(cb, 1)
+with open(log, "a") as f:
+    f.write("ready\n")
+time.sleep(60)
+"""
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetConsoleWindow.restype = wintypes.HWND
+user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+
+for key in (r"Console\%%Startup",):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            for name in ("DelegationConsole", "DelegationTerminal"):
+                try:
+                    print(key, name, winreg.QueryValueEx(k, name)[0])
+                except OSError as e:
+                    print(key, name, "unset", e)
+    except OSError as e:
+        print(key, "missing", e)
+print("session", os.environ.get("SESSIONNAME"), "user", os.environ.get("USERNAME"))
+print(subprocess.run(["query", "session"], capture_output=True, text=True).stdout)
+
+
+def spawn(tag):
+    log = os.path.join(os.environ.get("RUNNER_TEMP", "."), f"probe-{tag}.log")
+    if os.path.exists(log):
+        os.remove(log)
+    p = subprocess.Popen([sys.executable, "-I", "-c", CHILD, log],
+                         creationflags=subprocess.CREATE_NEW_CONSOLE,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(100):
+        if os.path.exists(log):
+            break
+        time.sleep(0.1)
+    return p, log
+
+
+def window_of(pid):
+    kernel32.FreeConsole()
+    if not kernel32.AttachConsole(pid):
+        return None, "AttachConsole failed %d" % ctypes.get_last_error()
+    w = kernel32.GetConsoleWindow()
+    kernel32.FreeConsole()
+    if not w:
+        return None, "no window"
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(w, buf, 256)
+    owner = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(w, ctypes.byref(owner))
+    return w, "class=%s owner=%d visible=%d" % (buf.value, owner.value, user32.IsWindowVisible(w))
+
+
+def outcome(p, log, tag):
+    try:
+        code = p.wait(10)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        code = "alive after 10 s"
+    print(f"RESULT {tag}: exit={code!r} log={open(log).read().split()!r}", flush=True)
+
+
+p, log = spawn("post")
+w, info = window_of(p.pid)
+print("post window", w, info)
+if w:
+    print("PostMessage", user32.PostMessageW(w, 0x0010, 0, 0), ctypes.get_last_error())
+outcome(p, log, "PostMessage WM_CLOSE")
+
+p, log = spawn("syscommand")
+w, info = window_of(p.pid)
+if w:
+    print("PostMessage SC_CLOSE", user32.PostMessageW(w, 0x0112, 0xF060, 0))
+outcome(p, log, "WM_SYSCOMMAND SC_CLOSE")
+
+p, log = spawn("taskkill")
+r = subprocess.run(["taskkill", "/PID", str(p.pid)], capture_output=True, text=True)
+print("taskkill", r.returncode, r.stdout.strip(), r.stderr.strip())
+outcome(p, log, "taskkill")
+
+# Same, with this user's console host pinned to the classic conhost.
+CONHOST = "{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}"
+with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Console\%%Startup") as k:
+    winreg.SetValueEx(k, "DelegationConsole", 0, winreg.REG_SZ, CONHOST)
+    winreg.SetValueEx(k, "DelegationTerminal", 0, winreg.REG_SZ, CONHOST)
+p, log = spawn("conhost")
+w, info = window_of(p.pid)
+print("conhost window", w, info)
+if w:
+    print("PostMessage", user32.PostMessageW(w, 0x0010, 0, 0), ctypes.get_last_error())
+outcome(p, log, "conhost pinned, PostMessage WM_CLOSE")

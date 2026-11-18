@@ -1,0 +1,13 @@
+name: Console close probe (temporary)
+on:
+  push:
+    branches: [windows-console-close]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: python -I scripts/console-close-probe.py
