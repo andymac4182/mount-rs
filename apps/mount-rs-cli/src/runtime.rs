@@ -97,11 +97,61 @@ impl std::error::Error for CliError {}
 /// first poll of `signal::ctrl_c`; merely constructing the future is not
 /// sufficient for a caller that may receive SIGINT during mount startup.
 pub(crate) struct CtrlCHandler {
-    signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>,
+    signal: ShutdownFuture,
     pending_signal: bool,
 }
 
-type ShutdownFuture = Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
+type ShutdownFuture = Pin<Box<dyn Future<Output = std::io::Result<StopRequest>> + Send>>;
+
+/// How a stop was asked for, which decides how long the stop may take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopRequest {
+    /// Ctrl-C, Ctrl-Break, SIGTERM or SIGINT: nothing ends the process
+    /// while it stops, so the drain and the drive shutdown each get their
+    /// configured limits.
+    Unbounded,
+    /// A Windows console close or system shutdown: Windows ends the process
+    /// about five seconds after the event, whatever it is doing, so the
+    /// whole stop must fit in this budget.
+    Deadline(Duration),
+}
+
+/// The console control events Windows delivers to a console process.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsoleEvent {
+    CtrlC,
+    CtrlBreak,
+    Close,
+    Logoff,
+    Shutdown,
+}
+
+/// What a stop after a console close or system shutdown may take. Windows
+/// ends the process about five seconds after either event; the second left
+/// over is for the process to exit after the drives are released.
+const WINDOWS_STOP_BUDGET: Duration = Duration::from_secs(4);
+
+/// The stop a console event asks for, if any.
+///
+/// Logoff is deliberately not a stop: a process running as a service
+/// receives it whenever any user signs out.
+///
+/// Tokio's console handler, which reaches this through the listeners in
+/// `shutdown_signal`, does not return to Windows after a close, logoff or
+/// shutdown event: it parks its thread. Windows therefore does not end the
+/// process when the handler returns, only when the process exits or the
+/// five-second limit passes.
+#[cfg_attr(not(windows), allow(dead_code))]
+const fn console_stop(event: ConsoleEvent) -> Option<StopRequest> {
+    match event {
+        ConsoleEvent::CtrlC | ConsoleEvent::CtrlBreak => Some(StopRequest::Unbounded),
+        ConsoleEvent::Close | ConsoleEvent::Shutdown => {
+            Some(StopRequest::Deadline(WINDOWS_STOP_BUDGET))
+        }
+        ConsoleEvent::Logoff => None,
+    }
+}
 
 /// Resolve on Ctrl-C, on SIGTERM on Unix, or on the other console stop
 /// events on Windows, so supervised servers drain sessions and release
@@ -116,6 +166,7 @@ fn shutdown_signal() -> Result<ShutdownFuture, CliError> {
                 result = tokio::signal::ctrl_c() => result,
                 _ = terminate.recv() => Ok(()),
             }
+            .map(|()| StopRequest::Unbounded)
         }))
     }
     #[cfg(windows)]
@@ -125,26 +176,36 @@ fn shutdown_signal() -> Result<ShutdownFuture, CliError> {
         // is also how a Windows container is stopped. Left unhandled, each
         // of the last three ends the process at once, with no drain and the
         // writer lease still held. Windows allows about five seconds after
-        // a close or shutdown event before it ends the process regardless.
-        //
-        // Logoff is deliberately not a stop: a process running as a service
-        // receives it whenever any user signs out.
+        // a close or shutdown event before it ends the process regardless;
+        // `console_stop` turns those two into a stop with that deadline.
         use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
         let mut ctrl_break = ctrl_break().map_err(io_error)?;
         let mut ctrl_close = ctrl_close().map_err(io_error)?;
         let mut ctrl_shutdown = ctrl_shutdown().map_err(io_error)?;
         Ok(Box::pin(async move {
-            tokio::select! {
-                result = tokio::signal::ctrl_c() => result,
-                _ = ctrl_break.recv() => Ok(()),
-                _ = ctrl_close.recv() => Ok(()),
-                _ = ctrl_shutdown.recv() => Ok(()),
+            loop {
+                let event = tokio::select! {
+                    result = tokio::signal::ctrl_c() => {
+                        result?;
+                        ConsoleEvent::CtrlC
+                    }
+                    _ = ctrl_break.recv() => ConsoleEvent::CtrlBreak,
+                    _ = ctrl_close.recv() => ConsoleEvent::Close,
+                    _ = ctrl_shutdown.recv() => ConsoleEvent::Shutdown,
+                };
+                if let Some(stop) = console_stop(event) {
+                    return Ok(stop);
+                }
             }
         }))
     }
     #[cfg(not(any(unix, windows)))]
     {
-        Ok(Box::pin(tokio::signal::ctrl_c()))
+        Ok(Box::pin(async {
+            tokio::signal::ctrl_c()
+                .await
+                .map(|()| StopRequest::Unbounded)
+        }))
     }
 }
 
@@ -164,9 +225,16 @@ impl CtrlCHandler {
     }
 
     pub(crate) async fn wait(&mut self) -> Result<(), CliError> {
+        self.wait_for_stop().await.map(|_| ())
+    }
+
+    /// Wait for a stop and say how it was asked for.
+    pub(crate) async fn wait_for_stop(&mut self) -> Result<StopRequest, CliError> {
         if self.pending_signal {
+            // Only `rearm` leaves a signal pending, and only the mount
+            // commands rearm, which give every stop the same treatment.
             self.pending_signal = false;
-            return Ok(());
+            return Ok(StopRequest::Unbounded);
         }
         self.signal.as_mut().await.map_err(io_error)
     }
@@ -185,14 +253,14 @@ impl CtrlCHandler {
 /// Poll a signal future exactly once. `false` means the listener returned
 /// `Pending`, which is the registration acknowledgement; `true` means a
 /// signal arrived during the initial poll and startup should stop.
-async fn poll_signal_registration<F>(mut signal: Pin<&mut F>) -> Result<bool, CliError>
+async fn poll_signal_registration<F, T>(mut signal: Pin<&mut F>) -> Result<bool, CliError>
 where
-    F: Future<Output = std::io::Result<()>> + ?Sized,
+    F: Future<Output = std::io::Result<T>> + ?Sized,
 {
     std::future::poll_fn(|context| {
         Poll::Ready(match signal.as_mut().poll(context) {
             Poll::Pending => Ok(false),
-            Poll::Ready(result) => result.map(|()| true).map_err(io_error),
+            Poll::Ready(result) => result.map(|_| true).map_err(io_error),
         })
     })
     .await
@@ -1304,7 +1372,7 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
 
     let signal_result = tokio::select! {
         _ = report_cache_stats(http, &runtimes, &server), if http.cache_report_interval_seconds.is_some() => unreachable!(),
-        result = ctrl_c.wait() => result,
+        result = ctrl_c.wait_for_stop() => result,
         reason = async {
             let mut accept_failures = 0;
             loop {
@@ -1321,12 +1389,37 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
             }
         } => Err(CliError::runtime(reason)),
     };
+    // A console close or system shutdown on Windows leaves only a few
+    // seconds before Windows ends the process, drained or not. Then the
+    // drain gets half of them and the drives what is left, so the writer
+    // lease is released before that happens rather than left to expire.
+    let deadline = match signal_result {
+        Ok(StopRequest::Deadline(budget)) => Some(StopBudget::start(budget)),
+        _ => None,
+    };
     // Keep SDK ownership alive through the listener/session drain.
-    let closed = server.close().await;
+    let closed = match &deadline {
+        None => server.close().await,
+        Some(budget) => {
+            let drain = budget.total / 2;
+            match tokio::time::timeout(drain, server.close()).await {
+                Ok(closed) => closed,
+                // What the drain was still serving is abandoned: the
+                // process exits as soon as the drives are released.
+                Err(_) => Err(CliError::abandoning(format!(
+                    "drain cut short after {} ms: Windows ends the process about 5 s after a console close or system shutdown",
+                    drain.as_millis()
+                ))),
+            }
+        }
+    };
     if let Some(log) = access_log {
         // The listener has stopped: write out the lines of the last
         // requests before the drives, which may take a while, are closed.
-        let _ = tokio::task::spawn_blocking(move || log.flush(Duration::from_secs(2))).await;
+        let limit = deadline
+            .as_ref()
+            .map_or(Duration::from_secs(2), |_| Duration::from_millis(250));
+        let _ = tokio::task::spawn_blocking(move || log.flush(limit)).await;
     }
     // A drain that ran out of time has aborted what it was still serving.
     // Release the drives regardless, so the writer lease is free for the
@@ -1336,7 +1429,11 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     // then fences the rest, and the process is about to exit anyway.
     // That shutdown is bounded as well: a drive whose storage has stopped
     // answering must not keep the process from exiting.
-    let released = shutdown_runtimes(http, &runtimes, &metadata_pools).await;
+    let drive_limit = Duration::from_millis(http.drive_shutdown_timeout_ms);
+    let drive_limit = deadline
+        .as_ref()
+        .map_or(drive_limit, |budget| drive_limit.min(budget.remaining()));
+    let released = shutdown_runtimes_within(drive_limit, http, &runtimes, &metadata_pools).await;
     leave_if_abandoned(stop_failure(closed, released))?;
     signal_result?;
     println!("http stopped");
@@ -1427,7 +1524,43 @@ fn http_server_options(
 ///
 /// Running out of time is an error that says which drives were left, and
 /// one the process must not outlive: see [`CliError::abandons_running_work`].
+/// The time a stop with a deadline has, counted from when the stop began.
+struct StopBudget {
+    total: Duration,
+    started: std::time::Instant,
+}
+
+impl StopBudget {
+    fn start(total: Duration) -> Self {
+        Self {
+            total,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// What is left of the budget, but never less than a quarter of it: a
+    /// drive shutdown given no time at all is certain to leave its lease.
+    fn remaining(&self) -> Duration {
+        self.left_after(self.started.elapsed())
+    }
+
+    fn left_after(&self, elapsed: Duration) -> Duration {
+        self.total.saturating_sub(elapsed).max(self.total / 4)
+    }
+}
+
 async fn shutdown_runtimes(
+    config: &HttpServiceConfig,
+    runtimes: &[DriverRuntime],
+    pools: &std::collections::BTreeMap<String, mount_rs_sdk::TidbStorePool>,
+) -> Result<(), CliError> {
+    let limit = Duration::from_millis(config.drive_shutdown_timeout_ms);
+    shutdown_runtimes_within(limit, config, runtimes, pools).await
+}
+
+/// Shut the drives down as `shutdown_runtimes` does, within `limit`.
+async fn shutdown_runtimes_within(
+    limit: Duration,
     config: &HttpServiceConfig,
     runtimes: &[DriverRuntime],
     pools: &std::collections::BTreeMap<String, mount_rs_sdk::TidbStorePool>,
@@ -1452,12 +1585,7 @@ async fn shutdown_runtimes(
         }
         first_error.map_or(Ok(()), Err)
     };
-    shutdown_within(
-        Duration::from_millis(config.drive_shutdown_timeout_ms),
-        drives,
-        pools,
-    )
-    .await
+    shutdown_within(limit, drives, pools).await
 }
 
 /// Run `drives`' shutdowns one at a time, last first, then `shared`, and
@@ -2723,6 +2851,41 @@ mod tests {
             context.waker().wake_by_ref();
             Poll::Pending
         }
+    }
+
+    #[test]
+    fn console_events_map_to_the_stop_windows_allows() {
+        // Ctrl-C and Ctrl-Break leave the process running until it exits.
+        assert_eq!(
+            console_stop(ConsoleEvent::CtrlC),
+            Some(StopRequest::Unbounded)
+        );
+        assert_eq!(
+            console_stop(ConsoleEvent::CtrlBreak),
+            Some(StopRequest::Unbounded)
+        );
+        // A close or shutdown is followed about 5 s later by Windows ending
+        // the process, so the stop must fit well inside that.
+        for event in [ConsoleEvent::Close, ConsoleEvent::Shutdown] {
+            let Some(StopRequest::Deadline(budget)) = console_stop(event) else {
+                panic!("{event:?} must stop the server within a deadline");
+            };
+            assert!(budget < Duration::from_secs(5), "{event:?}: {budget:?}");
+            assert!(budget >= Duration::from_secs(2), "{event:?}: {budget:?}");
+        }
+        // A service receives logoff whenever any user signs out.
+        assert_eq!(console_stop(ConsoleEvent::Logoff), None);
+    }
+
+    #[test]
+    fn stop_budget_leaves_the_drives_time_even_when_spent() {
+        let budget = StopBudget::start(Duration::from_secs(4));
+        assert!(budget.remaining() <= Duration::from_secs(4));
+        assert_eq!(budget.left_after(Duration::ZERO), Duration::from_secs(4));
+        let half = Duration::from_secs(2);
+        assert_eq!(budget.left_after(half), half);
+        let spent = Duration::from_secs(12);
+        assert_eq!(budget.left_after(spent), Duration::from_secs(1));
     }
 
     #[tokio::test]
