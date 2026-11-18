@@ -42,7 +42,7 @@ for key in (r"Console\%%Startup",):
     except OSError as e:
         print(key, "missing", e)
 print("session", os.environ.get("SESSIONNAME"), "user", os.environ.get("USERNAME"))
-print(subprocess.run(["query", "session"], capture_output=True, text=True).stdout)
+
 
 
 def spawn(tag):
@@ -60,19 +60,32 @@ def spawn(tag):
     return p, log
 
 
+WINDOW = r"""
+import ctypes, sys
+from ctypes import wintypes
+k = ctypes.WinDLL("kernel32", use_last_error=True)
+u = ctypes.WinDLL("user32", use_last_error=True)
+k.GetConsoleWindow.restype = wintypes.HWND
+u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+k.FreeConsole()
+if not k.AttachConsole(int(sys.argv[1])):
+    sys.exit("AttachConsole failed %d" % ctypes.get_last_error())
+w = k.GetConsoleWindow()
+k.FreeConsole()
+buf = ctypes.create_unicode_buffer(256)
+u.GetClassNameW(w, buf, 256)
+print(w or 0, buf.value)
+"""
+
+
 def window_of(pid):
-    kernel32.FreeConsole()
-    if not kernel32.AttachConsole(pid):
-        return None, "AttachConsole failed %d" % ctypes.get_last_error()
-    w = kernel32.GetConsoleWindow()
-    kernel32.FreeConsole()
-    if not w:
-        return None, "no window"
-    buf = ctypes.create_unicode_buffer(256)
-    user32.GetClassNameW(w, buf, 256)
-    owner = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(w, ctypes.byref(owner))
-    return w, "class=%s owner=%d visible=%d" % (buf.value, owner.value, user32.IsWindowVisible(w))
+    r = subprocess.run([sys.executable, "-I", "-c", WINDOW, str(pid)], capture_output=True,
+                       text=True, stdin=subprocess.DEVNULL,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+    if r.returncode:
+        return None, r.stderr.strip()
+    w, cls = r.stdout.split(maxsplit=1)
+    return int(w) or None, cls.strip()
 
 
 def outcome(p, log, tag):
@@ -93,7 +106,8 @@ def methods(prefix):
         print("PostMessage", user32.PostMessageW(w, 0x0010, 0, 0), ctypes.get_last_error())
     outcome(p, log, prefix + " PostMessage WM_CLOSE")
     p, log = spawn(prefix + "taskkill")
-    r = subprocess.run(["taskkill", "/PID", str(p.pid)], capture_output=True, text=True)
+    r = subprocess.run(["taskkill", "/PID", str(p.pid)], capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
     print("taskkill", r.returncode, r.stdout.strip(), r.stderr.strip())
     outcome(p, log, prefix + " taskkill")
 
