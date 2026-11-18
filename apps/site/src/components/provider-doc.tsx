@@ -734,6 +734,12 @@ WHERE volume_key = '<owned-volume-key>';`,
         production deployment remain separate. Its live TiDB/RustFS rows
         require <code>MOUNT_RS_TIDB_URL</code> and loopback RustFS credentials;
         do not treat those credentials or hosted fixtures as production IAM.
+        The crash tests use SIGKILL, which leaves the page cache and disks
+        alone: real power loss and host fsync are not tested and need
+        hardware or a block device that drops unsynced writes. The mounted
+        SQLite tests, including the mount crash, run on Linux FUSE only, and
+        the backup, upgrade and observability policies under W08 are static
+        checks, not drills.
       </>
     ),
     evidence: (
@@ -757,11 +763,18 @@ WHERE volume_key = '<owned-volume-key>';`,
         lease in TiDB. <code>ozone-tidb</code> composes TiDB metadata with
         Apache Ozone blocks and measured 3,624 operations a second against
         its 1,000 floor; that figure is a gate on shared runners, not a
-        capacity number. Still open, and listed in the readiness notes:
-        error code 9006 for an autocommit statement is not provoked by any
-        CI job and is reported as an unknown outcome; power loss and host fsync are not tested; the mounted
-        SQLite test runs on Linux FUSE only; and the backup, upgrade and
-        observability policies under W08 are static checks, not drills.
+        capacity number. <code>tidb-gc-life-time</code> provokes error code
+        9006 for an autocommit statement on a TiDB of its own and checks
+        that the statement did not commit; the provider still reports 9006
+        as an unknown outcome. The <code>tidb</code> and{' '}
+        <code>tidb-rustfs</code> jobs kill every PD, TiKV and TiDB process at
+        once with SIGKILL while a writer publishes, restart them, and check
+        that every acknowledged publication survived, the one in flight is
+        whole or absent and was not replayed, and the dead writer is
+        fenced. <code>tidb-rustfs</code> also kills the <code>mount-rs</code>{' '}
+        process with SIGKILL while SQLite is inside a transaction on the
+        mount, and after a remount SQLite&apos;s integrity check passes with
+        every committed transaction present.
       </>
     ),
     sources: [

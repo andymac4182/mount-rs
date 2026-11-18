@@ -92,12 +92,13 @@ repeated on `main` after all of them were merged.
   reported as an unknown outcome and is not retried. That includes 9006 (GC
   life time) and any other code whose message says "write conflict" or "try
   again later"; until this change those were treated as known non-commits
-  by their text. 9006 was provoked for an autocommit statement once,
-  in a local run of the opt-in
-  `actual_tidb_gc_life_time_error_is_an_unknown_autocommit_outcome` against
-  a single-node v8.5.7 cluster, and the row was unchanged. That test needs
-  about 22 minutes, because TiDB accepts no GC life time below ten minutes,
-  and no CI job runs it, so the provider does not rely on it.
+  by their text. 9006 is provoked for an autocommit statement by
+  `actual_tidb_gc_life_time_error_is_an_unknown_autocommit_outcome`, which
+  the `tidb-gc-life-time` job runs on a single-node v8.5.7 cluster of its
+  own; the row is unchanged afterwards. That test needs about 22 minutes,
+  because TiDB accepts no GC life time below ten minutes. It shows one way
+  TiDB raises 9006, before the statement commits, not that 9006 can never
+  follow a commit, so the provider still reports it as an unknown outcome.
   The classification of the three codes still rests on TiDB closing the
   connection, rather than returning one of them, when a commit is
   undetermined. Statements inside an explicit transaction, and block writes
@@ -189,7 +190,10 @@ images.
 |------|-------|----------|
 | A stalled server hung one statement, and everything queued behind it (rated High below) | Closed by #130 | Every statement, `COMMIT`, rollback and connect has a client deadline. `actual_tidb_stalled_commit_times_out_with_unknown_outcome` and `actual_tidb_stalled_autocommit_publication_times_out_with_unknown_outcome` stall the acknowledgement through a proxy and require an unknown outcome with no replay; `actual_tidb_max_execution_time_interrupts_reads_but_not_writes` and `actual_tidb_sessions_carry_the_statement_limits` pin what TiDB's own limit covers. Run by `scripts/test-tidb.sh`, so by the `tidb`, `tidb-rustfs` and `ozone-tidb` jobs |
 | Writer lease on a concurrent-mode volume was refused with `EOVERFLOW` | Closed by #130 | Returns `EBUSY`. Pinned by the live tests in `providers/mount-rs-tidb/tests/concurrent.rs` and by `delegated_directory_authority_fences_old_and_stale_clients`; same jobs |
-| Autocommit conflict errors were classified as non-commits without a live check | Closed for 9007, 1205 and 1213; 9006 is reported as an unknown outcome | `actual_tidb_autocommit_conflicts_are_known_non_commits` provokes 9007 and 1205, and `actual_tidb_autocommit_deadlock_is_a_known_non_commit` provokes 1213, each for an autocommit statement; both check from the rows that no statement which reported the error had committed. `scripts/test-tidb.sh` runs each by its exact name and fails if it did not run. Only those three codes are known non-commits; 9006 and every other server error from an autocommit publish is an unknown outcome (`only_verified_codes_make_an_autocommit_error_a_known_non_commit`). No CI job provokes 9006; see "Remaining risk" |
+| Autocommit conflict errors were classified as non-commits without a live check | Closed for 9007, 1205 and 1213; 9006 is reported as an unknown outcome | `actual_tidb_autocommit_conflicts_are_known_non_commits` provokes 9007 and 1205, and `actual_tidb_autocommit_deadlock_is_a_known_non_commit` provokes 1213, each for an autocommit statement; both check from the rows that no statement which reported the error had committed. `scripts/test-tidb.sh` runs each by its exact name and fails if it did not run. Only those three codes are known non-commits; 9006 and every other server error from an autocommit publish is an unknown outcome (`only_verified_codes_make_an_autocommit_error_a_known_non_commit`) |
+| Error 9006 for an autocommit statement was provoked only by an opt-in local test | Closed | The `tidb-gc-life-time` job runs `actual_tidb_gc_life_time_error_is_an_unknown_autocommit_outcome` alone on a single-node TiDB of its own (`MOUNT_RS_TIDB_GC_LIFE_TIME_ONLY=1`), because it lowers GLOBAL GC settings for about 22 minutes. It fails, rather than skips, unless the statement ends in 9006 with the row unchanged, and prints `TIDB_GC_LIFE_TIME_PASS` |
+| Simultaneous crash of every TiDB component | Closed | `providers/mount-rs-tidb/tests/crash_restart.rs` with `MOUNT_RS_TIDB_CRASH=1`. A writer publishes as fast as it can while one `docker kill --signal KILL` stops all three PD, three TiKV and the TiDB container, which are then all started again. Every acknowledged publication must survive, the in-flight one must be present exactly or absent, the writer must get a non-retryable error and not replay, every referenced block must read back, and the dead lease must be fenced once a successor takes over. Run by the `tidb` and `tidb-rustfs` jobs on the durable topology, between the ordered restarts and the persisted phase; a pass prints `TIDB_CRASH_RESTART_PASS` |
+| SIGKILL of the mounting process while SQLite is hosted | Closed | `apps/mount-rs-cli/tests/native_tidb_sqlite_crash.rs`, run by `scripts/test-tidb-rustfs-consumers.sh` in the `tidb-rustfs` job, with TiDB blocks and with RustFS blocks. The real `mount-rs` process (default exclusive mode, 30 s lease) is killed while SQLite is inside a transaction on a `DELETE`-journal and a `WAL` database (`synchronous=FULL`). A remount is refused until the lease expires. Then `PRAGMA integrity_check` must be `ok`, every committed transaction present and the interrupted one all there or absent. Linux FUSE only; each case prints `TIDB_SQLITE_MOUNT_CRASH_PASS` |
 | Tests that no script ran | Closed by #130 | `shared_pool`, `lost_block_ack_rustfs`, the SDK `tidb` tests and the cluster `tidb_sessions_preserve_handles_and_reopen_persisted_writes` test are run by `scripts/test-tidb.sh` and `scripts/test-tidb-rustfs-consumers.sh` |
 | Restart, fencing, concurrent publication, ambiguous commit | Covered before #130 | `actual_tidb_split_store_contract` and `actual_tidb_provider_clock_fencing_and_concurrent_publication` before and after TiDB, TiKV and PD restarts; `actual_tidb_commit_outcome_is_ambiguous_and_not_replayed`. A run counts only when it ends with `TIDB_ACCEPTANCE evidence=durable-multinode-restart` |
 | Composition with another provider's blocks | Covered | `actual_tidb_chunked_rustfs_contract` and `actual_tidb_rustfs_lost_block_ack_preserves_commit_and_retry` (RustFS, `tidb-rustfs` job); the Ozone composition in the `ozone-tidb` job |
@@ -276,12 +280,12 @@ therefore says nothing about TiDB with any block store other than Ozone.
   8 s, so `real_ozone_gateway_failure_is_bounded`, which allows 15 s, can
   exceed its limit on a slow runner. Seen once in the runs above; the test
   and the client were not changed.
-- Error 9006 for an autocommit statement is not provoked by any CI job.
-  The provider reports it as an unknown outcome instead of a retryable
-  conflict. The test that provokes it is opt-in
-  (`MOUNT_RS_TIDB_GC_LIFE_TIME_TEST=1`) and takes about 22 minutes.
-- Power loss, host fsync, and a crash of the mounting process while SQLite
-  is hosted are not tested. Component restart is.
+- Power loss and host fsync are not tested. The crash tests above use
+  SIGKILL, which leaves the page cache and the disks alone, so data a TiKV,
+  PD or the host had written but not yet fsynced survives them. Testing
+  that needs hardware, or a block device that drops unsynced writes.
+- The mount-crash test covers the default exclusive mode only, not
+  `ownership_mode: "exclusive"` (writeback) or shared mode.
 - The mounted SQLite-hosting test runs on Linux FUSE only. macOS NFS with
   TiDB is covered by the separate opt-in
   `apps/mount-rs-cli/tests/native_two_process_tidb.rs`, which no CI job
