@@ -380,7 +380,8 @@ impl RedisRouteRegistry {
     /// sentinels and looked up again after a failover. Every command goes
     /// to a server that reported the `master` role when it was connected
     /// and is checked against the sentinels about once a second while in
-    /// use; a replica is never read or written.
+    /// use, and before the first command after two seconds without a check;
+    /// a replica is never knowingly read or written.
     ///
     /// With `resolved`, the registry starts on a connection the caller got
     /// from [`SentinelPrimary::resolve`], so that an unreachable deployment

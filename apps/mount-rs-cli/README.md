@@ -1128,7 +1128,9 @@ The reasoning, the measurements and the limits are under
 failover design, and deployment steps in the
 [runbook](../../docs/serve-http-runbook.md#redis-sentinel).
 
-An ACL user for the Redis servers needs `+role` added to the rule above.
+An ACL user for the Redis servers needs `+role` added to the rule above,
+and one for the sentinels `+sentinel|get-master-addr-by-name
++client|setinfo`; the runbook has the full commands, which are tested.
 
 **Redis Cluster is not supported**: there is no cluster redirection in the
 client.
@@ -1143,10 +1145,13 @@ What is tested: one Redis 8.4, with TLS and without, stopped or cut off for
 longer than the route lifetime and then restored, and every connection
 killed by the server; and a Redis 8.4 Sentinel deployment (one primary, two
 replicas, three sentinels), with TLS and passwords and without, whose
-primary is killed, replaced by a promoted replica and later started again
-(`apps/mount-rs-cli/tests/redis_sentinel.rs`). What is not tested: a
-network partition inside a Sentinel deployment, Redis hosts with different
-clocks, an ACL user with Sentinel, a replicated pair behind one `redis_url`
+primary is killed, replaced by a promoted replica and later started again,
+also with ACL users holding only the documented commands
+(`apps/mount-rs-cli/tests/redis_sentinel.rs`), and partitioned: an old
+primary cut off but still accepting writes, a split brain with failover
+candidates on both sides, servers cut off from the primary or from the
+sentinels (`apps/mount-rs-cli/tests/redis_sentinel_partition.rs`). What is
+not tested: Redis hosts with different clocks, a replicated pair behind one `redis_url`
 address failing over, Redis Cluster, a proxy such as Envoy or HAProxy in
 front of Redis, and reconnecting through `redis_url` to an endpoint that
 still resolves to a demoted, read-only replica.

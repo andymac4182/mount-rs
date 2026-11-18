@@ -1026,10 +1026,17 @@ curl -H 'Authorization: Bearer demo-memory' \
         run’s second attempt. On the first, two failover tests failed closed
         when a storage stall outlasted the 250 ms their two-second test lease
         allowed a background renewal; the allowance now has a one-second
-        floor. Not covered: clusters of mixed releases
-        built from two published releases; Redis Cluster, which is not supported; a
-        network partition inside a Redis Sentinel deployment; and any
-        deployed collector, dashboard or pager.{' '}
+        floor. Added to <code>cluster-http3</code> after this run, and so
+        far passed only in local runs: the job also partitions a Redis
+        Sentinel deployment (an old primary cut off but still accepting
+        writes, which every server stops using within about a second of the
+        promotion; a split brain in which a standby finds the lease held
+        and no drive changes owner; servers cut off from the primary or
+        from the sentinels) and logs in as ACL users holding only the
+        documented commands. Not covered: clusters of mixed releases built
+        from two published releases; Redis Cluster, which is not supported;
+        Redis hosts with different clocks; and any deployed collector,
+        dashboard or pager.{' '}
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,
         ranges, truncate, concurrent writes, restart/reopen, and cleanup. The
         optional <code>mount-rs-observability</code> seam can attach a
