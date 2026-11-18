@@ -1000,21 +1000,38 @@ where
         .map_err(|error| db_error(operation, error))
 }
 
+/// TiDB server error codes that are known non-commits when an autocommit
+/// statement reports them. Each was provoked for an autocommit statement
+/// against TiDB v8.5.7, and the row showed the statement had not committed:
+///
+/// - 9007, write conflict, and 1205, lock wait timeout:
+///   `actual_tidb_autocommit_conflicts_are_known_non_commits`.
+/// - 1213, deadlock: `actual_tidb_autocommit_deadlock_is_a_known_non_commit`.
+///
+/// 9006 ("GC life time is shorter than transaction duration") is left out on
+/// purpose. TiDB accepts no `tidb_gc_life_time` or `tidb_gc_max_wait_time`
+/// below ten minutes, so the continuous-integration lane cannot provoke it,
+/// and no test that runs there shows what it means for a commit. The list is
+/// by code alone: a message that carries "write conflict" or "try again
+/// later" under any other code has not been checked either.
+const AUTOCOMMIT_NON_COMMIT_CODES: [u16; 3] = [1205, 1213, 9007];
+
+fn is_known_autocommit_non_commit(error: &MysqlError) -> bool {
+    matches!(error, MysqlError::Server(server) if AUTOCOMMIT_NON_COMMIT_CODES.contains(&server.code))
+}
+
 fn autocommit_error(operation: &str, error: MysqlError) -> FsError {
-    // TiDB can report a statement-level write conflict before the
-    // autocommit transaction is committed, so preserve the existing retryable
-    // conflict classification for that server response. A connection or
-    // other acknowledgement error cannot distinguish commit from rollback;
-    // fail closed instead of allowing the caller to replay the publication.
-    //
-    // Checked against TiDB v8.5.7 by
-    // `actual_tidb_autocommit_conflicts_are_known_non_commits`: error 9007
-    // ("Write conflict ... [try again later]") and error 1205 are both
-    // reported for an autocommit statement that did not commit. When TiDB
-    // cannot tell whether a commit applied it closes the connection instead
-    // of answering, which is not a server error and so lands in the
-    // unknown-outcome branch.
-    if is_retryable_conflict(&error) {
+    // An autocommit statement is its own commit, so an error from it says
+    // whether the publication applied only when TiDB is known to report that
+    // error for a statement that did not commit. Those codes map to the
+    // retryable conflict. Everything else fails closed as an unknown outcome
+    // so the caller cannot replay the publication: a connection or
+    // acknowledgement error, a timeout, and any server error outside the
+    // verified list, including 9006 and other codes whose message says
+    // "write conflict" or "try again later". When TiDB cannot tell whether a
+    // commit applied it closes the connection instead of answering, which is
+    // not a server error and so is an unknown outcome too.
+    if is_known_autocommit_non_commit(&error) {
         db_error(operation, error)
     } else {
         ambiguous_commit_error(operation, &error)
@@ -1192,6 +1209,14 @@ fn mysql_error_detail(error: &MysqlError) -> String {
     }
 }
 
+/// Whether a statement failed with a conflict worth retrying. This is for
+/// statements where a retry is safe whether or not the failed one applied: a
+/// read, a statement inside an explicit transaction that has not been asked
+/// to commit, and an autocommit write that repeats to the same result (a
+/// content-addressed block put, a delete, the schema bootstrap). Matching
+/// broadly, by code or by TiDB's retry wording, can therefore only cause a
+/// retry. An autocommit publication, where a replay would not be safe, is
+/// classified by [`is_known_autocommit_non_commit`] instead.
 fn is_retryable_conflict(error: &MysqlError) -> bool {
     let MysqlError::Server(server) = error else {
         return false;
@@ -3585,6 +3610,15 @@ mod tests {
         connection
     }
 
+    /// What the provider does with an error from an autocommit write.
+    fn classified_as_known_non_commit(error: &MysqlError) -> bool {
+        let MysqlError::Server(server) = error else {
+            return false;
+        };
+        is_known_autocommit_non_commit(error)
+            && autocommit_error("probe", MysqlError::Server(server.clone())).is(ErrorCode::Eagain)
+    }
+
     async fn probe_value(connection: &mut Conn, table: &str) -> i64 {
         connection
             .query_first(format!("SELECT v FROM {table} WHERE id=1"))
@@ -3616,16 +3650,6 @@ mod tests {
             .query_drop(format!("INSERT INTO {table} VALUES (1, 0)"))
             .await
             .unwrap();
-
-        // What the provider does with an error from an autocommit write.
-        fn classified_as_known_non_commit(error: &MysqlError) -> bool {
-            let MysqlError::Server(server) = error else {
-                return false;
-            };
-            is_retryable_conflict(error)
-                && autocommit_error("probe", MysqlError::Server(server.clone()))
-                    .is(ErrorCode::Eagain)
-        }
 
         // 1. Write conflict. An autocommit statement commits optimistically.
         //    With TiDB's automatic retry switched off, a commit by another
@@ -3769,6 +3793,360 @@ mod tests {
             .unwrap();
         drop(observer);
         pool.disconnect().await.unwrap();
+    }
+
+    /// Two autocommit statements deadlock on each other. TiDB retries a
+    /// deadlock inside one statement by itself when the lock in the cycle was
+    /// taken by the statement's current lock request, so the error only
+    /// reaches the client when a statement still holds a lock from an earlier
+    /// attempt. Fair locking keeps such a lock: a single-row statement that
+    /// waited for a row and found it changed keeps the row locked while it
+    /// runs again. Here each statement selects its row by `tag`, both wait
+    /// for a transaction that swaps the tags, and after it commits each one
+    /// holds its old row and needs the row the other holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+    async fn actual_tidb_autocommit_deadlock_is_a_known_non_commit() {
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("actual TiDB URL required");
+        let pool = Pool::from_url(&url).unwrap();
+        let mut observer = conflict_session(&pool).await;
+        let version: String = observer
+            .query_first("SELECT VERSION()")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(version.to_ascii_lowercase().contains("tidb"), "{version}");
+        let table = format!("mount_rs_tidb_deadlock_probe_{}", std::process::id());
+        observer
+            .query_drop(format!(
+                "CREATE TABLE {table} (id INT PRIMARY KEY, tag VARCHAR(8) NOT NULL, v BIGINT NOT NULL)"
+            ))
+            .await
+            .unwrap();
+
+        const ROUNDS: usize = 3;
+        // The amount each statement adds, so the rows show which committed.
+        const STATEMENTS: [(&str, i64); 2] = [("x", 1_000), ("y", 100_000)];
+        let mut codes = BTreeMap::<u16, usize>::new();
+        let mut committed = 0_usize;
+        for round in 0..ROUNDS {
+            observer
+                .query_drop(format!("DELETE FROM {table}"))
+                .await
+                .unwrap();
+            observer
+                .query_drop(format!(
+                    "INSERT INTO {table} VALUES (1, 'x', 0), (2, 'y', 0)"
+                ))
+                .await
+                .unwrap();
+            let mut swapper = conflict_session(&pool).await;
+            swapper.query_drop("BEGIN PESSIMISTIC").await.unwrap();
+            swapper
+                .query_drop(format!(
+                    "UPDATE {table} SET tag=IF(id=1, 'y', 'x') WHERE id IN (1, 2)"
+                ))
+                .await
+                .unwrap();
+            let mut statements = Vec::new();
+            for (tag, amount) in STATEMENTS {
+                let mut session = conflict_session(&pool).await;
+                session
+                    .query_drop("SET SESSION tidb_pessimistic_txn_fair_locking=ON")
+                    .await
+                    .unwrap();
+                let table = table.clone();
+                statements.push(tokio::spawn(async move {
+                    session
+                        .query_drop(format!("UPDATE {table} SET v=v+{amount} WHERE tag='{tag}'"))
+                        .await
+                }));
+            }
+            // Both statements must be waiting for the swap before it
+            // commits. A round where one is late simply does not deadlock,
+            // and the test fails below unless some round did.
+            let waiting_since = std::time::Instant::now();
+            loop {
+                let waiting: Option<i64> = observer
+                    .query_first(
+                        "SELECT COUNT(DISTINCT TRX_ID) FROM information_schema.data_lock_waits",
+                    )
+                    .await
+                    .unwrap();
+                if waiting >= Some(2) {
+                    break;
+                }
+                assert!(
+                    waiting_since.elapsed() < Duration::from_secs(30),
+                    "the autocommit statements never waited for the swap"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            swapper.query_drop("COMMIT").await.unwrap();
+
+            let mut expected = 0_i64;
+            for ((tag, amount), statement) in STATEMENTS.into_iter().zip(statements) {
+                let outcome = tokio::time::timeout(Duration::from_secs(120), statement)
+                    .await
+                    .expect("TiDB must end the deadlock itself")
+                    .unwrap();
+                match outcome {
+                    Ok(()) => {
+                        committed += 1;
+                        expected += amount;
+                    }
+                    Err(error) => {
+                        println!(
+                            "TIDB_CONFLICT version={version} case=deadlock round={round} statement={tag} error={error}"
+                        );
+                        assert!(
+                            classified_as_known_non_commit(&error),
+                            "an error the provider would not treat as a known non-commit: {error:?}"
+                        );
+                        let MysqlError::Server(server) = &error else {
+                            unreachable!("classified errors are server errors");
+                        };
+                        *codes.entry(server.code).or_default() += 1;
+                    }
+                }
+            }
+            let total: Option<i64> = observer
+                .query_first(format!("SELECT CAST(SUM(v) AS SIGNED) FROM {table}"))
+                .await
+                .unwrap();
+            assert_eq!(
+                total,
+                Some(expected),
+                "a statement that reported a deadlock committed anyway"
+            );
+        }
+        println!(
+            "TIDB_CONFLICT version={version} case=deadlock rounds={ROUNDS} committed={committed} errors={codes:?}"
+        );
+        assert!(
+            codes.get(&1213).copied().unwrap_or(0) > 0,
+            "no autocommit statement reported a deadlock, so the run verified nothing: {codes:?}"
+        );
+
+        observer
+            .query_drop(format!("DROP TABLE {table}"))
+            .await
+            .unwrap();
+        drop(observer);
+        pool.disconnect().await.unwrap();
+    }
+
+    /// Provokes error 9006 for an autocommit statement and records what the
+    /// provider does with it. No script runs this unless it is asked to: it
+    /// lowers three GLOBAL garbage-collection settings to their minimum for
+    /// its duration, so the server must be disposable, and it needs about 22
+    /// minutes, because TiDB accepts no life time below ten minutes and
+    /// collects once per ten-minute interval.
+    ///
+    /// The statement reads its row, sleeps, and then reads a second table at
+    /// its original snapshot. Once the safe point has passed that snapshot,
+    /// the second read fails with 9006.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires a disposable TiDB service, MOUNT_RS_TIDB_URL and about 22 minutes"]
+    async fn actual_tidb_gc_life_time_error_is_an_unknown_autocommit_outcome() {
+        const GC_SETTINGS: [(&str, &str, &str, &str); 3] = [
+            ("tidb_gc_life_time", "'1m'", "'10m'", "10m0s"),
+            ("tidb_gc_run_interval", "'1m'", "'10m'", "10m0s"),
+            ("tidb_gc_max_wait_time", "1", "600", "600"),
+        ];
+        // Long enough for a collection to start after the statement is ten
+        // minutes old: at most two intervals and the worker's one-minute
+        // tick apart, plus the time TiDB takes to learn the new safe point.
+        const SLEEP_SECONDS: u64 = 1_320;
+
+        let url = std::env::var("MOUNT_RS_TIDB_URL").expect("actual TiDB URL required");
+        let pool = Pool::from_url(&url).unwrap();
+        let mut observer = conflict_session(&pool).await;
+        let version: String = observer
+            .query_first("SELECT VERSION()")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(version.to_ascii_lowercase().contains("tidb"), "{version}");
+
+        let mut original = Vec::new();
+        for (name, below_minimum, minimum, reported) in GC_SETTINGS {
+            let value: String = observer
+                .query_first(format!("SELECT CAST(@@GLOBAL.{name} AS CHAR)"))
+                .await
+                .unwrap()
+                .unwrap();
+            original.push((name, value));
+            // TiDB raises a value below the minimum to the minimum, which is
+            // why the statement below has to outlive ten minutes.
+            observer
+                .query_drop(format!("SET GLOBAL {name}={below_minimum}"))
+                .await
+                .unwrap();
+            let clamped: String = observer
+                .query_first(format!("SELECT CAST(@@GLOBAL.{name} AS CHAR)"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                clamped, reported,
+                "{name} accepted a value below its minimum"
+            );
+            observer
+                .query_drop(format!("SET GLOBAL {name}={minimum}"))
+                .await
+                .unwrap();
+        }
+
+        let table = format!("mount_rs_tidb_gc_probe_{}", std::process::id());
+        let other = format!("{table}_other");
+        observer
+            .query_drop(format!(
+                "CREATE TABLE {table} (id INT PRIMARY KEY, v BIGINT NOT NULL)"
+            ))
+            .await
+            .unwrap();
+        observer
+            .query_drop(format!(
+                "CREATE TABLE {other} (id INT PRIMARY KEY, v BIGINT NOT NULL)"
+            ))
+            .await
+            .unwrap();
+        observer
+            .query_drop(format!("INSERT INTO {table} VALUES (1, 0)"))
+            .await
+            .unwrap();
+        observer
+            .query_drop(format!("INSERT INTO {other} VALUES (1, 0), (2, 0)"))
+            .await
+            .unwrap();
+
+        let mut session = conflict_session(&pool).await;
+        let started = std::time::Instant::now();
+        let outcome = session
+            .query_drop(format!(
+                "UPDATE {table} SET v=v+1000 WHERE id=1 AND SLEEP({SLEEP_SECONDS})=0 AND \
+                 (SELECT /*+ NO_DECORRELATE() */ COUNT(*) FROM {other} WHERE {other}.v >= {table}.v) >= 0"
+            ))
+            .await;
+        let elapsed = started.elapsed();
+
+        // Put the settings back before judging the result.
+        for (name, value) in original {
+            observer
+                .query_drop(format!("SET GLOBAL {name}='{value}'"))
+                .await
+                .unwrap();
+        }
+        let value = probe_value(&mut observer, &table).await;
+        observer
+            .query_drop(format!("DROP TABLE {table}"))
+            .await
+            .unwrap();
+        observer
+            .query_drop(format!("DROP TABLE {other}"))
+            .await
+            .unwrap();
+        drop((observer, session));
+        pool.disconnect().await.unwrap();
+
+        let error = outcome.expect_err("the statement outlived the GC life time");
+        println!(
+            "TIDB_CONFLICT version={version} case=gc_life_time elapsed_seconds={} value={value} error={error}",
+            elapsed.as_secs()
+        );
+        let MysqlError::Server(server) = &error else {
+            panic!("a GC life time error is a server error: {error:?}");
+        };
+        assert_eq!(server.code, 9006, "{error}");
+        assert_eq!(
+            value, 0,
+            "the statement that reported a GC life time error must not have committed"
+        );
+        // One opt-in run is not standing evidence, so the provider does not
+        // call this a known non-commit.
+        assert!(!classified_as_known_non_commit(&error));
+        let reported = autocommit_error("probe", server_error(server.code, &server.message));
+        assert!(reported.is(ErrorCode::Eio), "{reported}");
+        assert!(
+            reported.to_string().contains("commit outcome is unknown"),
+            "{reported}"
+        );
+    }
+
+    fn server_error(code: u16, message: &str) -> MysqlError {
+        MysqlError::Server(ServerError {
+            code,
+            message: message.to_owned(),
+            state: "HY000".to_owned(),
+        })
+    }
+
+    #[test]
+    fn only_verified_codes_make_an_autocommit_error_a_known_non_commit() {
+        for (code, message) in [
+            (
+                1205,
+                "Lock wait timeout exceeded; try restarting transaction",
+            ),
+            (
+                1213,
+                "Deadlock found when trying to get lock; try restarting transaction",
+            ),
+            (
+                9007,
+                "Write conflict, txnStartTS=1, conflictStartTS=2 [try again later]",
+            ),
+        ] {
+            let error = autocommit_error("publish metadata", server_error(code, message));
+            assert!(error.is(ErrorCode::Eagain), "{code}: {error}");
+        }
+
+        // Not verified for an autocommit statement, so never a known
+        // non-commit: 9006, and any other code whatever its message says.
+        for (code, message) in [
+            (9006, "GC life time is shorter than transaction duration"),
+            (
+                8022,
+                "Error: KV error safe to retry tikv restarts txn [try again later]",
+            ),
+            (
+                8028,
+                "Information schema is changed during the execution of the statement [try again later]",
+            ),
+            (
+                8005,
+                "Write conflict, txnStartTS 1 is stale [try again later]",
+            ),
+            (1105, "write conflict"),
+        ] {
+            let error = autocommit_error("publish metadata", server_error(code, message));
+            assert!(error.is(ErrorCode::Eio), "{code}: {error}");
+            assert!(!error.is(ErrorCode::Eagain), "{code}: {error}");
+            assert!(
+                error.to_string().contains("commit outcome is unknown"),
+                "{code}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeatable_statements_keep_the_broad_retry_classification() {
+        // Where a retry is safe whether or not the statement applied,
+        // these stay retryable conflicts whatever the code.
+        for (code, message) in [
+            (1205, "Lock wait timeout exceeded"),
+            (1213, "Deadlock found when trying to get lock"),
+            (9006, "GC life time is shorter than transaction duration"),
+            (9007, "Write conflict [try again later]"),
+            (8022, "Error: KV error safe to retry [try again later]"),
+            (1105, "write conflict"),
+        ] {
+            let error = db_error("read TiDB inode", server_error(code, message));
+            assert!(error.is(ErrorCode::Eagain), "{code}: {error}");
+        }
+        let error = db_error("read TiDB inode", server_error(1062, "Duplicate entry"));
+        assert!(!error.is(ErrorCode::Eagain), "{error}");
     }
 
     #[test]

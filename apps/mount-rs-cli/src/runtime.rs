@@ -1070,31 +1070,49 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
         let invalid_drive = |error: &dyn std::fmt::Display| {
             CliError::usage(format!("invalid HTTP drive '{}': {error}", drive.id))
         };
-        let (tokens, token) = match &drive.token {
+        // Every check of the drive's token reads `tokens`: the file routes,
+        // the session routes, and the owner in a forwarding cluster. A
+        // reload of a token file replaces the set for all of them at once.
+        const SESSION_CLIENT: &str = "configured-volume-client";
+        let (tokens, credentials) = match &drive.token {
             crate::config::TokenSource::Env(variable) => {
                 let token = std::env::var(&variable.name).map_err(|_| {
                     CliError::runtime(format!("missing environment variable {}", variable.name))
                 })?;
                 let tokens = mount_rs_http::DriveTokens::new(vec![token.clone()])
                     .map_err(|error| invalid_drive(&error))?;
-                (tokens, Some(token))
+                let credentials = if http.remote_sessions {
+                    Some(mount_rs_cluster::SessionCredentials::new(vec![(
+                        SESSION_CLIENT.into(),
+                        token,
+                    )])?)
+                } else {
+                    None
+                };
+                (tokens, credentials)
             }
             crate::config::TokenSource::File(path) => {
-                let loaded = crate::token_reload::LoadedTokens::load(path)
+                // With sessions, a file is valid only if the session routes
+                // accept each of its tokens, at startup and at each reload.
+                let loaded = crate::token_reload::LoadedTokens::load(path, http.remote_sessions)
                     .map_err(|error| invalid_drive(&error))?;
                 let tokens = loaded.tokens();
                 token_files.push((drive.id.clone(), loaded));
-                (tokens, None)
+                // Each token of the file is a client of its own, so a
+                // session belongs to the token that made it and is out of
+                // reach once the file no longer lists that token.
+                let credentials = if http.remote_sessions {
+                    Some(mount_rs_cluster::SessionCredentials::for_drive(
+                        SESSION_CLIENT,
+                        tokens.clone(),
+                    )?)
+                } else {
+                    None
+                };
+                (tokens, credentials)
             }
         };
-        let credentials = match (&token, http.remote_sessions) {
-            (Some(token), true) => Some(mount_rs_cluster::SessionCredentials::new(vec![(
-                "configured-volume-client".into(),
-                token.clone(),
-            )])?),
-            _ => None,
-        };
-        configured_drives.push((drive, tokens, token, credentials));
+        configured_drives.push((drive, tokens, credentials));
     }
     let mut ctrl_c = CtrlCHandler::install().await?;
     // Only a server with a token file takes SIGHUP for itself: without one
@@ -1117,7 +1135,7 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     let startup = async {
         let mut owned = Vec::new();
         let mut candidates = Vec::new();
-        for (drive, tokens, token, credentials) in configured_drives {
+        for (drive, tokens, credentials) in configured_drives {
             let options = drive.driver.to_options();
             let metadata_pool = match (
                 http.tidb_metadata_pool_limit,
@@ -1161,14 +1179,9 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                         })
                     }
                 };
-                let Some(token) = token else {
-                    return Err(CliError::usage(
-                        "peer owner requires drive tokens from the environment",
-                    ));
-                };
                 candidates.push(mount_rs_cluster::FailoverDrive {
                     volume: drive.id.clone(),
-                    bearer_token: token,
+                    tokens,
                     sessions: credentials,
                     factory: Arc::new(factory),
                 });
@@ -1200,12 +1213,7 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                         "peer owner requires a local splitstore runtime",
                     ));
                 };
-                let Some(token) = token else {
-                    return Err(CliError::usage(
-                        "peer owner requires drive tokens from the environment",
-                    ));
-                };
-                owned.push((drive.id.clone(), token, filesystem.clone(), credentials));
+                owned.push((drive.id.clone(), tokens, filesystem.clone(), credentials));
                 continue;
             }
             if let Some(credentials) = credentials {
@@ -1247,6 +1255,7 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
                 drives,
                 server_options.clone(),
                 http.sessions,
+                metrics.clone(),
             )
             .await;
         }

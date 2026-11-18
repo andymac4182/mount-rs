@@ -756,8 +756,8 @@ WHERE volume_key = '<owned-volume-key>';`,
         Apache Ozone blocks and measured 3,738 operations a second against
         its 1,000 floor; that figure is a gate on shared runners, not a
         capacity number. Still open, and listed in the readiness notes:
-        error codes 1213 and 9006 for an autocommit statement are
-        unverified; power loss and host fsync are not tested; the mounted
+        error code 9006 for an autocommit statement is not provoked by any
+        CI job and is reported as an unknown outcome; power loss and host fsync are not tested; the mounted
         SQLite test runs on Linux FUSE only; and the backup, upgrade and
         observability policies under W08 are static checks, not drills.
       </>

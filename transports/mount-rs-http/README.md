@@ -182,7 +182,9 @@ case-insensitive; the token is compared exactly.
 - A token for drive A is rejected with `401` on drive B.
 - The operator can rotate a drive's token. While a rotation is under way
   the drive accepts two tokens, the new one and the one before, and both
-  work in every way. Once the operator drops the old token it returns the
+  work in every way. (On a server with sessions, a session stays with the
+  token that opened it: open a new session with the new token.) Once the
+  operator drops the old token it returns the
   same `401` as any wrong token; that is the signal to reload your
   credential. Where the operator has not set the drive up for rotation
   without a restart, the change happens at a restart and there is no period

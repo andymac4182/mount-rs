@@ -569,7 +569,14 @@ impl OwnerService {
     }
 }
 
-type OwnedDrive = (String, String, Arc<Filesystem>, Option<SessionCredentials>);
+/// A drive's id, the tokens it accepts, its filesystem and, with
+/// `remote_sessions`, the credentials of its session routes.
+type OwnedDrive = (
+    String,
+    mount_rs_http::DriveTokens,
+    Arc<Filesystem>,
+    Option<SessionCredentials>,
+);
 
 /// The drives of an owner.
 pub(crate) enum OwnedDrives {
@@ -701,6 +708,7 @@ pub(crate) async fn start_owner(
     drives: OwnedDrives,
     options: HttpServerOptions,
     session_limits: SessionLimitsConfig,
+    metrics: Option<Arc<mount_rs_http::HttpMetrics>>,
 ) -> Result<Service, CliError> {
     use mount_rs_cluster::{
         ClusterIngress, OwnedVolumeRegistration, OwnerHttpHandler, OwnerHttpRouter,
@@ -743,7 +751,7 @@ pub(crate) async fn start_owner(
             release_timeout,
         } => (Vec::new(), Some(drives), release_timeout),
     };
-    for (volume, token, fs, credentials) in drives {
+    for (volume, tokens, fs, credentials) in drives {
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce)
             .map_err(|_| CliError::runtime("cannot generate owner registration ID"))?;
@@ -761,7 +769,7 @@ pub(crate) async fn start_owner(
             OwnedVolumeRegistration::new(fs.clone(), registry.clone(), route.clone(), ROUTE_TTL)
                 .await
                 .map_err(|e| CliError::runtime(format!("owner registration: {e:?}")))?;
-        let mut handler = OwnerHttpHandler::new(fs, route, token, options.clone())
+        let mut handler = OwnerHttpHandler::with_tokens(fs, route, tokens, options.clone())
             .await
             .map_err(|e| fail(&e))?;
         if let Some(credentials) = credentials {
@@ -782,6 +790,12 @@ pub(crate) async fn start_owner(
     let router = OwnerHttpRouter::new(handlers)
         .map_err(|e| fail(&e))?
         .with_peer_protocol_observer(Arc::new(report_peer_protocol));
+    if let Some(metrics) = metrics {
+        // Readiness of the drives owned at each scrape: with failover they
+        // come and go, and a drive that is another server's has no series.
+        let owned = router.clone();
+        metrics.observe_owned_drives(move || owned.drives());
+    }
     let (remote, peers) = connect_forwarder(
         config,
         options.max_request_bytes,

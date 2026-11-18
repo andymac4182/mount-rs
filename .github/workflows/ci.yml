@@ -857,6 +857,9 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
           MOUNT_RS_PGLITE_TEST_SCOPE: native-fuse
+          # Below the limit on the command, so that the script stops the
+          # step that is running and names it, with the server's output.
+          MOUNT_RS_PGLITE_GATE_LIMIT_SECONDS: '450'
         run: timeout 480s ./scripts/test-pglite.sh
 
   rust:
@@ -1061,6 +1064,15 @@ jobs:
         # routes and forwarding responses of openapi-cluster.yaml. The tests
         # of this file that need no Redis also run in the workspace job.
         run: cargo test --locked -p mount-rs-cli --test cluster_contract -- --include-ignored
+      - name: Test token-file rotation and the metrics on a forwarding cluster
+        env:
+          MOUNT_RS_REDIS_TEST_URL: redis://127.0.0.1:6379/
+        # Real servers: a token file rotated on an owner, through an
+        # ingress and on a failover standby, with open sessions, and the
+        # Prometheus series of each server compared with the requests sent.
+        # The test of this file that needs no Redis also runs in the
+        # workspace job.
+        run: cargo test --locked -p mount-rs-cli --test cluster_operations -- --include-ignored
       - name: Test a Redis Sentinel registry through a failover of its primary
         env:
           MOUNT_RS_REDIS_SENTINEL_TEST_IMAGE: redis:8.4@sha256:319f54e668c14f68cee51d1fdf9dba699deecac048fc0e52962433a3ef5562c0
@@ -1317,10 +1329,22 @@ jobs:
         # The slowest runner (Intel macOS) spends about eight minutes of this
         # step compiling the Rust SDK and CLI test binaries before any case
         # runs; ten minutes cut it off mid-build.
+        #
+        # The script runs each of its commands under a limit and announces
+        # it first. Its own limit for the whole run is set just below this
+        # step's, so that a run that is out of time ends with the name of
+        # the command it was in and the PGlite server's output, not with a
+        # cancelled step. (The job's 45 minutes can still run out first if
+        # the steps before this one were slow; the log then ends at the
+        # announcement of the command that was running.)
         timeout-minutes: 25
+        env:
+          MOUNT_RS_PGLITE_GATE_LIMIT_SECONDS: '1380'
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh
       - name: Benchmark real volatile PGlite providers
         timeout-minutes: 5
+        env:
+          MOUNT_RS_PGLITE_GATE_LIMIT_SECONDS: '270'
         run: MOUNT_RS_PGLITE_TEST_SCOPE=benchmark ./scripts/test-pglite.sh
       - name: Preserve PGlite benchmark samples
         if: always()

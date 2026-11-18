@@ -185,7 +185,7 @@ can modify its tree.
 | Per-client connection limits | The server has one global connection limit | At the proxy. Keep the proxy's upstream pool below `max_connections`. |
 | Access and audit log | The server's optional access log has no path, no client address and no caller identity, so it is not an audit log | The proxy's access log: method, path, status, upstream time, bytes. Never the `Authorization` header. There is no record of which token made a request unless the proxy adds one (for example a hash of the header). |
 | Secret storage | Tokens are plain environment variables, or lines in a file whose permissions the server does not check | Give a token file mode 0600 and the service user as owner, or mount it as a secret. Deliver variables through the service manager's secret mechanism (systemd `LoadCredential=` or an `EnvironmentFile=` with mode 0600; a Kubernetes Secret). Not the command line, not the config file. On Linux a process's environment is readable by the same user and by root through `/proc/<pid>/environ`; run the service as a dedicated user. |
-| Token rotation | Without a restart, and with an overlap in which old and new both work, **only for a drive whose token is a file**. A drive whose token is an environment variable, and every drive of a server with `remote_sessions` or `forwarding` (which refuse `token.file`), still needs a restart and has no overlap | Follow the runbook's rotation steps. Rotate on a schedule so that the procedure is practised. Remove the old token's line when consumers have moved: nothing expires it for you. |
+| Token rotation | Without a restart, and with an overlap in which old and new both work, **only for a drive whose token is a file**, with or without `remote_sessions` and `forwarding`. A drive whose token is an environment variable still needs a restart and has no overlap. In a cluster the file is per server: the rotation must be made on every server that lists the drive, and nothing checks that they agree | Follow the runbook's rotation steps. Rotate on a schedule so that the procedure is practised. Remove the old token's line when consumers have moved: nothing expires it for you. |
 | Network isolation of the metrics listener | With `metrics.allow_non_loopback` anything that can reach that port reads the drive ids, the version, request rates and which drives are down, without a token | Leave it on loopback and scrape from the same host or pod. Otherwise admit only the scraper, by security group or NetworkPolicy. Never route it through the public proxy. |
 | Network isolation of the listener | With `allow_non_loopback` anything that can reach the port can try tokens and read cleartext traffic | A security group or NetworkPolicy that admits only the load balancer. |
 | Protection of `/healthz` and `/readyz` | Unauthenticated by design | Allow them from the load balancer and monitoring only. |
@@ -206,8 +206,11 @@ in the API guide. Do not build on an assumption that they exist.
 - **TLS, mutual TLS or client certificates on the public listener.**
 - **Token expiry and revocation lists.** A token is accepted until the
   operator removes it.
-- **Token rotation without a restart together with `remote_sessions` or
-  `forwarding`.** The config refuses `token.file` there.
+- **Distributing a token file to the servers of a cluster.** Each server
+  that lists a drive reads its own file; keeping them the same is the
+  operator's job.
+- **Closing a session at the moment its token is dropped.** The token is
+  refused at once; the session it opened is closed by idle expiry.
 - **Encryption at rest.** The transport stores what it is given; encryption
   is a property of the storage provider and its deployment.
 - **Audit logging.**
@@ -224,8 +227,9 @@ detail is in the [cluster chapter of the runbook](serve-http-runbook.md#clusters
 | Boundary | Mechanism | Notes |
 | --- | --- | --- |
 | Client to any server | The same per-drive bearer token. A server that does not own the drive forwards the request, token included, to the owner; **the owner performs the bearer check.** | Client-supplied `x-mount-owner-route` or `x-mount-hop` headers are refused with `400` before anything is forwarded. |
-| Session token | 256 random bits from the operating system, sent once in the `createSession` response and afterwards only in the `x-mount-session` header. Held in the owner's memory only. | It is not a credential by itself: every session request also needs the drive's bearer token, and a session is usable only with the token that created it. It ends on close, idle timeout, owner restart or failover. Proxies must not log `x-mount-session`. |
-| Drive tokens with `remote_sessions` | The server refuses to start unless each is 32-256 characters from a fixed set. | Length is checked, entropy is not. `token.file` is refused, so rotation is a restart with no overlap period. |
+| Session token | 256 random bits from the operating system, sent once in the `createSession` response and afterwards only in the `x-mount-session` header. Held in the owner's memory only. | It is not a credential by itself: every session request also needs the drive's bearer token, and a session is usable only with the token that created it: during a rotation the other accepted token does not reach it, and once its token is dropped nothing does. It ends on close, idle timeout, owner restart or failover. Proxies must not log `x-mount-session`. |
+| Drive tokens with `remote_sessions` | The server refuses to start unless each is 32-256 characters from a fixed set, and refuses a reloaded token file whole if one of its tokens is not. | Length is checked, entropy is not. The file routes and the session routes read the same token set, so a reload changes both at the same moment. |
+| Drive tokens with `forwarding` | Only a server that lists a drive holds its tokens. An ingress has none and checks none; the owner checks every request, forwarded or not, against the tokens it accepts when the request reaches it. | A rotation is made on each server that lists the drive (every failover candidate), and a standby reloads its file like an owner. Until all of them have reloaded, which token works depends on which candidate owns the drive. |
 | Server to server (peer port, UDP) | HTTP/3 over QUIC with mutual TLS. A peer is accepted only if its certificate chains to `forwarding.ca`, carries the peer role for a node listed in the membership file, **and** its public key matches that node's `spki_sha256` pin. A server dialling an owner checks the same. | The membership file is the root of trust: distribute it as carefully as a CA certificate. It is reloaded on `SIGHUP` and on a timer; a removed or re-keyed server has its open connections closed at once. One record holds one pin, so a key rotation has no overlap period. |
 | Server to Redis | The URL in the environment variable named by `forwarding.redis_url`. `rediss://` is verified against the system roots or `redis_ca`, and verification cannot be turned off. `redis://` is refused for any host but loopback unless `allow_plaintext_redis` is set. The URL and its password are never logged. With `forwarding.redis_sentinel` the same rules hold for every sentinel and for the Redis server a sentinel names: TLS unless `tls` is `false`, the same trust roots, no plaintext to another host without the opt-in, and passwords taken from environment variables and never logged. A sentinel is trusted only to name an address; the server at that address must pass the same TLS and login checks and report the `master` role. | Redis only advertises routes and candidate liveness: a route is used only if it matches a pinned member, and the owner checks its own fence before serving. A party that can write Redis can misdirect or deny requests and can delay a failover, but cannot make a server serve a drive or accept a peer. Treat Redis as a denial-of-service surface: authenticate it and isolate it. |
 | Peer private keys | Files named by `forwarding.certificate` and `forwarding.private_key`, read once at startup | A stolen peer key plus network reach to a peer port allows impersonating that node to the other servers, which includes receiving forwarded requests with their bearer tokens. Removing or re-pinning the node in the membership file revokes it at the next reload. |
@@ -316,8 +320,9 @@ Storage
 
 Cluster (only with `remote_sessions` or `forwarding`)
 
-- [ ] Every drive token is at least 32 random characters; a rotation by
-      restart, with no overlap period, has been rehearsed.
+- [ ] Every drive token is at least 32 random characters; a rotation has
+      been rehearsed on every server that lists the drive, including what
+      clients with open sessions do when their token is dropped.
 - [ ] The proxy does not log `x-mount-session`.
 - [ ] The peer port (UDP) of each owner is reachable only from the other
       servers.
@@ -361,6 +366,7 @@ Checked at the revision this document was added in. `server.rs` is
 | A token file is validated whole before it replaces the accepted tokens; a bad one changes nothing | `apps/mount-rs-cli/src/token_reload.rs`; `DriveTokens::replace` in `server.rs` |
 | Every accepted token compared without short-circuit | `DriveTokens::matches` in `server.rs` |
 | Tests for the overlap, the drop and the identical `401` | `launch_contract.rs`, `a_drive_accepts_each_of_its_tokens_until_the_set_is_replaced`; `apps/mount-rs-cli/tests/http_subprocess.rs`, `a_token_file_is_rotated_without_a_restart` |
+| The same with `remote_sessions`, on an owner, through an ingress and on a failover standby; a session is bound to its token and closed by idle expiry after the token is dropped | `apps/mount-rs-cli/tests/cluster_operations.rs`; `SessionCredentials::for_drive` in `crates/mount-rs-cluster/src/session_auth.rs`, `drive_credentials_follow_the_drive_tokens_as_they_are_replaced` |
 | `Debug` redaction of the token, with a test | `server.rs:99-107`, `server.rs:3643-3650` |
 | CLI diagnostics are redacted | `config.rs:2184-2200`; applied at `runtime.rs:45`, `runtime.rs:52` |
 | Health responses: fields, no drive ids, no authentication | `server.rs:1475-1509` |

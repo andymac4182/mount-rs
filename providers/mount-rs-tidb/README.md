@@ -27,6 +27,13 @@ mount-rs providers.
   Revision mismatch is `EAGAIN`; stale or expired fencing is `ESTALE`.
 - Lock/deadlock conflicts known before commit map to `EAGAIN` and the caller
   may retry the complete operation. There is no automatic transaction replay.
+  A single-statement publication is its own commit, so an error from it is a
+  known non-commit only for TiDB error codes 9007 (write conflict), 1205
+  (lock wait timeout) and 1213 (deadlock). Live tests provoke each of the
+  three for an autocommit statement and check from the rows that the
+  statement did not commit. Any other server error from such a statement,
+  including 9006 (GC life time) and any other code whose message says
+  "write conflict" or "try again later", is an unknown outcome.
   A lost publication acknowledgement or `COMMIT` error is returned as an I/O
   error with an unknown outcome and is
   never retried, because a lost connection cannot distinguish rollback from a
@@ -226,3 +233,8 @@ disposable server. Native macOS cases additionally require
 `MOUNT_RS_CLI_NATIVE_NFS=1` and `MOUNT_RS_CLI_NATIVE_TIDB_TWO_PROCESS=1`;
 TiDB/RustFS mounts also require
 `MOUNT_RS_CLI_NATIVE_RUSTFS_DISPOSABLE=1` and the owned RustFS credentials.
+
+`MOUNT_RS_TIDB_GC_LIFE_TIME_TEST=1` adds a test that provokes error 9006 for
+an autocommit statement. It lowers the cluster's GLOBAL garbage-collection
+settings to their minimum while it runs and takes about 22 minutes, because
+TiDB accepts no GC life time below ten minutes. No CI job sets it.

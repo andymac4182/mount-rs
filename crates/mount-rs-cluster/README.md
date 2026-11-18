@@ -431,13 +431,19 @@ records consume capacity; successful cleanup releases it. The limit applies only
 to participating registries and bounds session count, not cache or request-buffer
 memory. Unbudgeted `new` remains a per-volume-only constructor.
 
-`SessionCredentials` is a static owner-side bearer-token-to-principal map for
-session HTTP routes. It rejects duplicate Authorization headers and never trusts
+`SessionCredentials` is an owner-side bearer-token-to-principal map for
+session HTTP routes: a fixed one (`new`), or one that reads a drive's
+`DriveTokens` at every request (`for_drive`), where each token is a
+principal of its own. It rejects duplicate Authorization headers and never trusts
 caller identity headers. Supply high-entropy tokens over encrypted transport;
 length validation does not establish entropy. Debug redacts credential material.
 `serve-http` uses it for the session routes of every drive when
-`http.remote_sessions` is set. It does not manage TLS or rotation: tokens
-are read at startup and change by restart.
+`http.remote_sessions` is set. It does not manage TLS. A drive whose token
+is a file gets `for_drive` credentials over the same token set as its file
+routes, so a reload of the file reaches both at once; a session stays with
+the token that opened it and is left to idle expiry once that token is
+dropped. A token from the environment is read at startup and changes by
+restart.
 
 `SessionHttpHandler` implements `HttpRequestHandler` for authenticated POST/DELETE
 `/v1/drives/{volume}/sessions`. POST returns protocol version 1 and a session token;

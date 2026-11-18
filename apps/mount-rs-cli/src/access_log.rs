@@ -198,6 +198,7 @@ mod tests {
             duration: Duration::from_micros(12_345),
             bytes_in: 19,
             bytes_out: 44,
+            from_peer: false,
         }
     }
 

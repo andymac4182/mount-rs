@@ -551,6 +551,32 @@ async fn file_request(
     (response.status(), received, not_dispatched)
 }
 
+/// A bound loopback UDP socket whose port nothing else is given once the
+/// socket is dropped for a server to bind, and the claim that keeps it so.
+///
+/// A port chosen by binding port 0 goes to the next socket bound to port 0
+/// as soon as it is closed. This one comes from below every system's range
+/// for port 0 (32768 on Linux, 49152 on macOS), and a TCP listener on the
+/// same number, which the server never asks for, marks it as taken for
+/// every test that chooses a port this way (as the CLI's subprocess tests
+/// also do).
+#[cfg(unix)]
+fn reserved_udp() -> (std::net::UdpSocket, std::net::TcpListener) {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    let start = std::process::id().wrapping_mul(7919).wrapping_add(nanos);
+    (0..8_000u32)
+        .map(|offset| 20_000 + (start.wrapping_add(offset) % 8_000) as u16)
+        .find_map(|port| {
+            let claim = std::net::TcpListener::bind(("127.0.0.1", port)).ok()?;
+            let socket = std::net::UdpSocket::bind(("127.0.0.1", port)).ok()?;
+            Some((socket, claim))
+        })
+        .expect("a free port below the ephemeral range")
+}
+
 #[cfg(unix)]
 async fn exercise_cli_ingress(
     binary: std::ffi::OsString,
@@ -566,7 +592,8 @@ async fn exercise_cli_ingress(
     write("client.key", ingress.key.serialize_pem());
     write("ca.pem", ca.cert.pem());
     let namespace = format!("{namespace}-cli");
-    let owner_address = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    // Held until the owner is launched, and then its port is still claimed.
+    let (owner_address, _owner_claim) = reserved_udp();
     let address = owner_address.local_addr().unwrap();
     write("owner.pem", owner.cert.pem());
     write("owner.key", owner.key.serialize_pem());

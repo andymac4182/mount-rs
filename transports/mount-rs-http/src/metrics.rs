@@ -27,7 +27,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-use crate::server::{AccessLog, AccessRecord, DriveConfig, HttpServerError};
+use crate::server::{AccessLog, AccessRecord, DriveConfig, DriveRegistry, HttpServerError};
 
 /// The `Content-Type` of the Prometheus text exposition format.
 pub const METRICS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -143,6 +143,7 @@ fn escaped(value: &str) -> String {
 }
 
 type Reading = Arc<dyn Fn() -> u64 + Send + Sync>;
+type OwnedDrives = Arc<dyn Fn() -> DriveRegistry + Send + Sync>;
 
 /// What an HTTP server has done, counted for a metrics scrape.
 ///
@@ -160,8 +161,12 @@ pub struct HttpMetrics {
     in_flight: AtomicI64,
     bytes_in: AtomicU64,
     bytes_out: AtomicU64,
+    /// Requests counted that another server of the cluster forwarded here.
+    from_peers: AtomicU64,
     /// Added to while the server starts, read at each scrape.
     drives: ArcSwap<Vec<DriveConfig>>,
+    /// The drives a cluster owner serves at the moment of a scrape.
+    owned_drives: OnceLock<OwnedDrives>,
     access_log_dropped: OnceLock<Reading>,
 }
 
@@ -183,7 +188,9 @@ impl HttpMetrics {
             in_flight: AtomicI64::new(0),
             bytes_in: AtomicU64::new(0),
             bytes_out: AtomicU64::new(0),
+            from_peers: AtomicU64::new(0),
             drives: ArcSwap::from_pointee(Vec::new()),
+            owned_drives: OnceLock::new(),
             access_log_dropped: OnceLock::new(),
         })
     }
@@ -196,6 +203,16 @@ impl HttpMetrics {
             next.push(drive.clone());
             next
         });
+    }
+
+    /// Report the readiness of the drives `owned` returns, asked at each
+    /// scrape, under their drive ids. For a cluster owner, whose drives are
+    /// each served by an application of their own and, with failover, come
+    /// and go while it runs: a drive this server does not own at the moment
+    /// has no series. `owned` must answer from memory. Only the first call
+    /// counts.
+    pub fn observe_owned_drives(&self, owned: impl Fn() -> DriveRegistry + Send + Sync + 'static) {
+        let _ = self.owned_drives.set(Arc::new(owned));
     }
 
     /// The counters for `route`, adding them if this is the first request
@@ -312,12 +329,21 @@ impl HttpMetrics {
              mount_rs_http_response_body_bytes_total {}",
             self.bytes_out.load(Ordering::Relaxed)
         )?;
+        writeln!(
+            out,
+            "# HELP mount_rs_http_forwarded_requests_total Requests received from another server of the cluster, which forwarded them here. They are counted in mount_rs_http_requests_total too.\n\
+             # TYPE mount_rs_http_forwarded_requests_total counter\n\
+             mount_rs_http_forwarded_requests_total {}",
+            self.from_peers.load(Ordering::Relaxed)
+        )?;
         out.push_str(
             "# HELP mount_rs_http_drive_ready Whether the drive is ready as /readyz counts it: 1 ready, 0 not.\n\
              # TYPE mount_rs_http_drive_ready gauge\n",
         );
         let drives = self.drives.load_full();
-        for drive in drives.iter() {
+        let owned = self.owned_drives.get().map(|owned| owned());
+        let owned = owned.iter().flat_map(DriveRegistry::drives);
+        for drive in drives.iter().chain(owned) {
             writeln!(
                 out,
                 "mount_rs_http_drive_ready{{drive=\"{}\"}} {}",
@@ -366,6 +392,9 @@ impl AccessLog for HttpMetrics {
         self.bytes_in.fetch_add(record.bytes_in, Ordering::Relaxed);
         self.bytes_out
             .fetch_add(record.bytes_out, Ordering::Relaxed);
+        if record.from_peer {
+            self.from_peers.fetch_add(1, Ordering::Relaxed);
+        }
         let micros = u64::try_from(record.duration.as_micros()).unwrap_or(u64::MAX);
         let (method, status) = (method_index(record.method), status_index(record.status));
         let routes = self.routes.load();
@@ -527,6 +556,7 @@ mod tests {
             duration,
             bytes_in: bytes.0,
             bytes_out: bytes.1,
+            from_peer: false,
         });
     }
 
@@ -681,6 +711,75 @@ mod tests {
         assert!(started > 1_600_000_000.0, "{started}");
         // Off until an access log is observed.
         assert!(!text.contains("access_log_dropped"), "{text}");
+    }
+
+    #[test]
+    fn requests_from_a_peer_are_counted_with_the_rest_and_on_their_own() {
+        let metrics = HttpMetrics::new("v");
+        let forwarded = "mount_rs_http_forwarded_requests_total";
+        assert_eq!(value(&metrics.render(), forwarded).as_deref(), Some("0"));
+        let route = "/v1/drives/{id}/sessions";
+        record(&metrics, "POST", route, Some(201), Duration::ZERO, (0, 0));
+        for _ in 0..2 {
+            metrics.begin();
+            metrics.record(&AccessRecord {
+                request_id: "id",
+                method: "POST",
+                route,
+                drive: None,
+                status: Some(201),
+                duration: Duration::ZERO,
+                bytes_in: 0,
+                bytes_out: 0,
+                from_peer: true,
+            });
+        }
+        let text = metrics.render();
+        assert_eq!(value(&text, forwarded).as_deref(), Some("2"));
+        assert_eq!(
+            value(
+                &text,
+                &format!(
+                    "mount_rs_http_requests_total{{route=\"{route}\",method=\"POST\",status=\"2xx\"}}"
+                )
+            )
+            .as_deref(),
+            Some("3")
+        );
+    }
+
+    /// An owner's drives are asked for at each scrape: one it has taken
+    /// since the last scrape appears, and one it has lost is gone.
+    #[test]
+    fn the_drives_an_owner_serves_now_are_reported_beside_the_configured_ones() {
+        use crate::server::DriveRegistry;
+        let drive = |id: &str| {
+            let fs: Arc<dyn mount_rs_core::FsDriver> = Arc::new(mount_rs_memfs::MemoryFs::empty());
+            DriveConfig::new(id, fs, "token").unwrap()
+        };
+        let metrics = HttpMetrics::new("v");
+        metrics.observe_drive(&drive("configured"));
+        let owned = Arc::new(ArcSwap::from_pointee(vec![drive("taken")]));
+        let source = Arc::clone(&owned);
+        metrics.observe_owned_drives(move || {
+            let mut registry = DriveRegistry::new();
+            for drive in source.load().iter() {
+                registry.register(drive.clone()).unwrap();
+            }
+            registry
+        });
+        let ready = |id: &str| {
+            value(
+                &metrics.render(),
+                &format!("mount_rs_http_drive_ready{{drive=\"{id}\"}}"),
+            )
+        };
+        assert_eq!(ready("configured").as_deref(), Some("1"));
+        assert_eq!(ready("taken").as_deref(), Some("1"));
+        owned.store(Arc::new(vec![drive("other")]));
+        assert_eq!(ready("taken"), None);
+        assert_eq!(ready("other").as_deref(), Some("1"));
+        assert_eq!(ready("configured").as_deref(), Some("1"));
     }
 
     #[test]
