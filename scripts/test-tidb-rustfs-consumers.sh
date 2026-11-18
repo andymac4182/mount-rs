@@ -49,6 +49,32 @@ if [ "$(uname -s)" = Linux ]; then
   MOUNT_RS_RUN_NATIVE_TIDB_SQLITE=1 \
     "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core \
       --test native_tidb_sqlite -- --ignored --nocapture --test-threads=1
+  if [ "${MOUNT_RS_TIDB_EXPECT_PERSISTED:-0}" = 0 ]; then
+    # SIGKILL the mount-rs process while SQLite is inside a transaction on
+    # the mount, remount once the dead process's lease expires, and check
+    # the databases. Each case has its own volume key, so the seed phase
+    # alone covers it. Both cases must run and pass: a filter that matched
+    # nothing would also exit 0.
+    crash_log=$(mktemp "${TMPDIR:-/tmp}/mount-rs-tidb-sqlite-crash.XXXXXX")
+    set +e
+    MOUNT_RS_RUN_NATIVE_TIDB_SQLITE_CRASH=1 \
+      "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-cli \
+        --test native_tidb_sqlite_crash -- --ignored --nocapture --test-threads=1 \
+        >"$crash_log" 2>&1
+    crash_status=$?
+    set -e
+    cat "$crash_log" >&2
+    crash_passes=$(grep -c 'TIDB_SQLITE_MOUNT_CRASH_PASS ' "$crash_log" || true)
+    crash_ran=0
+    if grep -q '^test result: ok\. 2 passed; 0 failed; 0 ignored' "$crash_log"; then
+      crash_ran=1
+    fi
+    rm -f "$crash_log"
+    if [ "$crash_status" -ne 0 ] || [ "$crash_ran" -ne 1 ] || [ "$crash_passes" -ne 2 ]; then
+      echo "test-tidb-rustfs-consumers.sh: the SQLite mount crash tests did not both pass" >&2
+      exit 1
+    fi
+  fi
 else
   echo "TIDB_SQLITE_HOSTING_SKIP reason=linux-fuse-required host=$(uname -s)" >&2
 fi

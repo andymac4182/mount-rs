@@ -101,7 +101,7 @@ const routes = [
     path: '/docs/providers/tidb',
     status: 200,
     contentType: 'text/html',
-    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', '3PD/3TiKV', 'MOUNT_RS_TIDB_URL', 'Validated', '44206434960', 'mount_rs_tidb_inodes', 'mount_rs_tidb_block_authority', 'statement_timeout_ms', 'tls_ca_file', 'unknown outcome'],
+    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', '3PD/3TiKV', 'MOUNT_RS_TIDB_URL', 'Validated', '44206434960', 'mount_rs_tidb_inodes', 'mount_rs_tidb_block_authority', 'statement_timeout_ms', 'tls_ca_file', 'unknown outcome', 'tidb-gc-life-time', 'SIGKILL', 'power loss'],
   },
   {
     path: '/docs/providers/foundationdb',

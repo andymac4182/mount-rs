@@ -234,7 +234,47 @@ disposable server. Native macOS cases additionally require
 TiDB/RustFS mounts also require
 `MOUNT_RS_CLI_NATIVE_RUSTFS_DISPOSABLE=1` and the owned RustFS credentials.
 
-`MOUNT_RS_TIDB_GC_LIFE_TIME_TEST=1` adds a test that provokes error 9006 for
-an autocommit statement. It lowers the cluster's GLOBAL garbage-collection
-settings to their minimum while it runs and takes about 22 minutes, because
-TiDB accepts no GC life time below ten minutes. No CI job sets it.
+`MOUNT_RS_TIDB_GC_LIFE_TIME_ONLY=1` runs only the test that provokes error
+9006 for an autocommit statement and checks that the statement did not
+commit and that the provider reports an unknown outcome. It lowers the
+cluster's GLOBAL garbage-collection settings to their minimum while it runs
+and takes about 22 minutes, because TiDB accepts no GC life time below ten
+minutes, so it needs a TiDB nothing else is using. The `tidb-gc-life-time`
+CI job runs it that way on a single-node cluster and prints
+`TIDB_GC_LIFE_TIME_PASS`; the test fails, rather than skips, if the
+statement ends any other way. (`MOUNT_RS_TIDB_GC_LIFE_TIME_TEST=1` adds it to
+a full run instead.) The provider still reports 9006 as an unknown outcome:
+the test shows one way TiDB raises it, before the statement commits, not
+that it can never be raised later.
+
+### Crash tests
+
+`MOUNT_RS_TIDB_CRASH=1` adds a whole-cluster process crash to
+`scripts/test-tidb.sh`. A writer
+(`tests/crash_restart.rs`) takes the lease and publishes one file per
+publication as fast as it can; the harness sends SIGKILL to every PD, TiKV
+and TiDB container in one `docker kill`, starts them all again, and a second
+process checks the restarted cluster: every acknowledged publication is
+present, the one in flight is present exactly as written or absent (never
+partly), the writer got an error that is not retryable and did not replay,
+every block the metadata names reads back with its bytes, and the dead
+writer's lease is refused once a new writer has taken over. In the durable
+topology this runs after the ordered restarts and before the persisted phase,
+so the persisted checks also run after it. A pass prints
+`TIDB_CRASH_RESTART_PASS`. The `tidb` and `tidb-rustfs` jobs set it.
+
+The `tidb-rustfs` job also runs
+`apps/mount-rs-cli/tests/native_tidb_sqlite_crash.rs` (Linux FUSE only,
+from `scripts/test-tidb-rustfs-consumers.sh`): SQLite commits transactions
+on a TiDB-backed mount of the real `mount-rs` binary, the mount process is
+killed with SIGKILL inside a transaction, the volume is mounted again once
+the dead process's 30-second writer lease expires (a remount before that is
+refused), and SQLite's `PRAGMA integrity_check` must pass with every
+committed transaction present and the interrupted one all there or absent.
+It runs with TiDB blocks and with RustFS blocks and prints
+`TIDB_SQLITE_MOUNT_CRASH_PASS` for each.
+
+Neither is a power-loss test. SIGKILL leaves the page cache and the disks
+alone, so data a TiKV or PD had written but not fsynced survives it. Real
+power loss and host fsync behaviour need hardware, or a block device that
+drops unsynced writes, and are not tested.
