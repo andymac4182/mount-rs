@@ -45,6 +45,19 @@ const BLOCK_SIZE: u64 = 4096;
 const MAX_SYMLINK_DEPTH: usize = 40;
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const LEASE_RENEWAL_MARGIN: Duration = Duration::from_secs(5);
+/// The least time the owner heartbeat allows one provider renewal, however
+/// short the heartbeat window: an ordinary storage stall of a few hundred
+/// milliseconds must not fail a healthy owner closed.
+const HEARTBEAT_RENEWAL_FLOOR: Duration = Duration::from_secs(1);
+
+/// How long the owner heartbeat waits for one renewal before it fails the
+/// volume closed. Half the heartbeat window, but never less than
+/// [`HEARTBEAT_RENEWAL_FLOOR`] unless that is more than half the lease: the
+/// heartbeat fires every half window, at most an eighth of the lease, so a
+/// renewal bounded by half the lease still ends before the lease does.
+fn heartbeat_renewal_limit(window: Duration, lease_ttl: Duration) -> Duration {
+    (window / 2).max(HEARTBEAT_RENEWAL_FLOOR.min(lease_ttl / 2))
+}
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_PENDING_MUTATIONS: usize = 1024;
 /// Every operation enters the lifecycle gate, on every core, so its counter
@@ -157,7 +170,10 @@ pub struct ChunkedOptions {
     /// Opt-in background heartbeat window for an idle exclusive owner. Zero
     /// (the default) disables it. When set it must be at least 20 ms and at
     /// most a quarter of `lease_ttl`; the provider lease is renewed every
-    /// half window so an idle owner keeps its fence. While it is set, path
+    /// half window so an idle owner keeps its fence. A renewal that takes
+    /// longer than half the window, or one second where that is longer and
+    /// no more than half the lease, fails the volume closed, because its
+    /// outcome is then unknown. While it is set, path
     /// and handle stats trust the cached lease exactly as reads do instead
     /// of forcing a provider lease check per call.
     pub read_lease_cache_window: Duration,
@@ -2338,6 +2354,7 @@ where
         if window.is_zero() {
             return;
         }
+        let renewal_limit = heartbeat_renewal_limit(window, self.inner.options.lease_ttl);
         let weak = Arc::downgrade(&self.inner);
         let task = tokio::spawn(async move {
             loop {
@@ -2351,7 +2368,8 @@ where
                     Ok(state) if state.failure.is_none() && !state.closed => {}
                     _ => return,
                 }
-                match tokio::time::timeout(window / 2, filesystem.renew_lease_inner(true)).await {
+                match tokio::time::timeout(renewal_limit, filesystem.renew_lease_inner(true)).await
+                {
                     Ok(Ok(_)) => {}
                     Ok(Err(_)) => return,
                     Err(_) => {
@@ -10198,6 +10216,98 @@ mod tests {
         async fn flush(&self) -> Result<()> {
             self.inner.flush().await
         }
+    }
+
+    /// Delays every renewal by a settable time.
+    #[derive(Clone)]
+    struct SlowRenewalMetadata {
+        inner: MemoryMetadataStore,
+        delay_ms: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait]
+    impl MetadataStore for SlowRenewalMetadata {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+
+        async fn load(&self) -> Result<LoadedMetadata> {
+            self.inner.load().await
+        }
+
+        async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
+            self.inner.acquire_writer(owner, ttl).await
+        }
+
+        async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
+            tokio::time::sleep(Duration::from_millis(self.delay_ms.load(Ordering::SeqCst))).await;
+            self.inner.renew_writer(lease, ttl).await
+        }
+
+        async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
+            self.inner.release_writer(lease).await
+        }
+
+        async fn publish(
+            &self,
+            expected_revision: u64,
+            lease: &WriterLease,
+            namespace: Namespace,
+        ) -> Result<u64> {
+            self.inner
+                .publish(expected_revision, lease, namespace)
+                .await
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.inner.flush().await
+        }
+    }
+
+    #[test]
+    fn heartbeat_renewal_limit_has_a_floor_below_the_lease() {
+        let ms = Duration::from_millis;
+        // A short window does not make the limit shorter than a stall.
+        assert_eq!(heartbeat_renewal_limit(ms(500), ms(2_000)), ms(1_000));
+        assert_eq!(heartbeat_renewal_limit(ms(20), ms(80)), ms(40));
+        // The default window keeps half of itself.
+        assert_eq!(
+            heartbeat_renewal_limit(Duration::from_secs(60), Duration::from_secs(240)),
+            Duration::from_secs(30)
+        );
+    }
+
+    /// A renewal that takes longer than half the heartbeat window, as when
+    /// the provider waits for a lock or a slow disk, must not fail the owner
+    /// closed while the lease still has most of its life; one that outlasts
+    /// the limit must.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_heartbeat_renewal_fails_closed_only_past_its_limit() {
+        let metadata = SlowRenewalMetadata {
+            inner: MemoryMetadataStore::new(),
+            delay_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        };
+        let fs = ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            ChunkedOptions::fixed("slow-heartbeat", 4)
+                .unwrap()
+                .with_lease_ttl(Duration::from_secs(2))
+                .with_read_lease_cache_window(Duration::from_millis(500)),
+        )
+        .await
+        .unwrap();
+
+        // Longer than half the window (250 ms), shorter than the limit.
+        metadata.delay_ms.store(600, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(1_800)).await;
+        fs.write_file("/still-owned", b"bytes").await.unwrap();
+
+        // Longer than the limit: the outcome of the renewal is unknown.
+        metadata.delay_ms.store(1_600, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(2_800)).await;
+        let error = fs.write_file("/fenced", b"bytes").await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Estale, "{error:?}");
     }
 
     #[test]
