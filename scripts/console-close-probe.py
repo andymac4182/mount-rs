@@ -51,7 +51,8 @@ def spawn(tag):
         os.remove(log)
     p = subprocess.Popen([sys.executable, "-I", "-c", CHILD, log],
                          creationflags=subprocess.CREATE_NEW_CONSOLE,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
     for _ in range(100):
         if os.path.exists(log):
             break
@@ -83,32 +84,23 @@ def outcome(p, log, tag):
     print(f"RESULT {tag}: exit={code!r} log={open(log).read().split()!r}", flush=True)
 
 
-p, log = spawn("post")
-w, info = window_of(p.pid)
-print("post window", w, info)
-if w:
-    print("PostMessage", user32.PostMessageW(w, 0x0010, 0, 0), ctypes.get_last_error())
-outcome(p, log, "PostMessage WM_CLOSE")
 
-p, log = spawn("syscommand")
-w, info = window_of(p.pid)
-if w:
-    print("PostMessage SC_CLOSE", user32.PostMessageW(w, 0x0112, 0xF060, 0))
-outcome(p, log, "WM_SYSCOMMAND SC_CLOSE")
+def methods(prefix):
+    p, log = spawn(prefix + "post")
+    w, info = window_of(p.pid)
+    print(prefix, "window", w, info)
+    if w:
+        print("PostMessage", user32.PostMessageW(w, 0x0010, 0, 0), ctypes.get_last_error())
+    outcome(p, log, prefix + " PostMessage WM_CLOSE")
+    p, log = spawn(prefix + "taskkill")
+    r = subprocess.run(["taskkill", "/PID", str(p.pid)], capture_output=True, text=True)
+    print("taskkill", r.returncode, r.stdout.strip(), r.stderr.strip())
+    outcome(p, log, prefix + " taskkill")
 
-p, log = spawn("taskkill")
-r = subprocess.run(["taskkill", "/PID", str(p.pid)], capture_output=True, text=True)
-print("taskkill", r.returncode, r.stdout.strip(), r.stderr.strip())
-outcome(p, log, "taskkill")
 
-# Same, with this user's console host pinned to the classic conhost.
+methods("default")
 CONHOST = "{B23D10C0-E52E-411E-9D5B-C09FDF709C7D}"
 with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Console\%%Startup") as k:
     winreg.SetValueEx(k, "DelegationConsole", 0, winreg.REG_SZ, CONHOST)
     winreg.SetValueEx(k, "DelegationTerminal", 0, winreg.REG_SZ, CONHOST)
-p, log = spawn("conhost")
-w, info = window_of(p.pid)
-print("conhost window", w, info)
-if w:
-    print("PostMessage", user32.PostMessageW(w, 0x0010, 0, 0), ctypes.get_last_error())
-outcome(p, log, "conhost pinned, PostMessage WM_CLOSE")
+methods("conhost")
