@@ -29,7 +29,7 @@ const routes = [
     path: '/architecture',
     status: 200,
     contentType: 'text/html',
-    expected: ['How a mount-rs server', 'stays fast.', 'Load balancer', 'Send request', 'HTTP/3 peer mesh', 'Forwarding: any node, one hop to the owner.', 'Seven layers between a request and the object store.', 'Durable by default, writeback by choice.', 'What makes it fast', 'Clustering is built into', 'about 21 seconds after', 'Failover: stop a node', 'aria-label="Stop Node 2"', 'there is no automatic fail-back by', 'serve-http-failover.md', 'Retry-After: 1'],
+    expected: ['How a mount-rs server', 'stays fast.', 'Load balancer', 'Send request', 'HTTP/3 peer mesh', 'Forwarding: any node, one hop to the owner.', 'Seven layers between a request and the object store.', 'Durable by default, writeback by choice.', 'What makes it fast', 'Clustering is built into', 'about 21 seconds after', 'Failover: stop a node', 'aria-label="Stop Node 2"', 'there is no automatic fail-back by', 'serve-http-failover.md', 'Retry-After: 1', 'Redis Sentinel deployment but not Redis'],
   },
   { path: '/architecture/', status: 307, redirectTo: '/architecture' },
   {
@@ -156,7 +156,7 @@ const routes = [
     path: '/docs/transports/http',
     status: 200,
     contentType: 'text/html',
-    expected: ['HTTP multi-drive API', '/v1/drives', 'Validated', '44141640175', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'clusters of mixed releases', 'cluster-mixed-release', 'refuses a peer whose version it does not speak'],
+    expected: ['HTTP multi-drive API', '/v1/drives', 'Validated', '44141640175', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'clusters of mixed releases', 'cluster-mixed-release', 'refuses a peer whose version it does not speak', 'the primary of a Redis Sentinel deployment', 'Redis Cluster is not supported'],
   },
   {
     path: '/docs/transports/webdav',

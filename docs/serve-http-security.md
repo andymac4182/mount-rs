@@ -227,7 +227,7 @@ detail is in the [cluster chapter of the runbook](serve-http-runbook.md#clusters
 | Session token | 256 random bits from the operating system, sent once in the `createSession` response and afterwards only in the `x-mount-session` header. Held in the owner's memory only. | It is not a credential by itself: every session request also needs the drive's bearer token, and a session is usable only with the token that created it. It ends on close, idle timeout, owner restart or failover. Proxies must not log `x-mount-session`. |
 | Drive tokens with `remote_sessions` | The server refuses to start unless each is 32-256 characters from a fixed set. | Length is checked, entropy is not. `token.file` is refused, so rotation is a restart with no overlap period. |
 | Server to server (peer port, UDP) | HTTP/3 over QUIC with mutual TLS. A peer is accepted only if its certificate chains to `forwarding.ca`, carries the peer role for a node listed in the membership file, **and** its public key matches that node's `spki_sha256` pin. A server dialling an owner checks the same. | The membership file is the root of trust: distribute it as carefully as a CA certificate. It is reloaded on `SIGHUP` and on a timer; a removed or re-keyed server has its open connections closed at once. One record holds one pin, so a key rotation has no overlap period. |
-| Server to Redis | The URL in the environment variable named by `forwarding.redis_url`. `rediss://` is verified against the system roots or `redis_ca`, and verification cannot be turned off. `redis://` is refused for any host but loopback unless `allow_plaintext_redis` is set. The URL and its password are never logged. | Redis only advertises routes and candidate liveness: a route is used only if it matches a pinned member, and the owner checks its own fence before serving. A party that can write Redis can misdirect or deny requests and can delay a failover, but cannot make a server serve a drive or accept a peer. Treat Redis as a denial-of-service surface: authenticate it and isolate it. |
+| Server to Redis | The URL in the environment variable named by `forwarding.redis_url`. `rediss://` is verified against the system roots or `redis_ca`, and verification cannot be turned off. `redis://` is refused for any host but loopback unless `allow_plaintext_redis` is set. The URL and its password are never logged. With `forwarding.redis_sentinel` the same rules hold for every sentinel and for the Redis server a sentinel names: TLS unless `tls` is `false`, the same trust roots, no plaintext to another host without the opt-in, and passwords taken from environment variables and never logged. A sentinel is trusted only to name an address; the server at that address must pass the same TLS and login checks and report the `master` role. | Redis only advertises routes and candidate liveness: a route is used only if it matches a pinned member, and the owner checks its own fence before serving. A party that can write Redis can misdirect or deny requests and can delay a failover, but cannot make a server serve a drive or accept a peer. Treat Redis as a denial-of-service surface: authenticate it and isolate it. |
 | Peer private keys | Files named by `forwarding.certificate` and `forwarding.private_key`, read once at startup | A stolen peer key plus network reach to a peer port allows impersonating that node to the other servers, which includes receiving forwarded requests with their bearer tokens. Removing or re-pinning the node in the membership file revokes it at the next reload. |
 
 Differences from a single server that matter for security:
@@ -252,9 +252,14 @@ Redis TLS with a private CA, password and ACL logins, refused plaintext, and
 outages (`apps/mount-rs-cli/tests/redis_connection.rs`); the session
 authentication cases and the reserved-header refusal through real servers
 (`apps/mount-rs-cli/tests/cluster_contract.rs`); servers cut off from
-Redis during a failover (`apps/mount-rs-cli/tests/failover.rs`). Not
-tested: a partition of the server-to-server link, a Redis replica
-promotion, and a hostile peer that holds a valid key.
+Redis during a failover (`apps/mount-rs-cli/tests/failover.rs`); a Redis
+Sentinel deployment with TLS, a private CA and separate passwords for the
+sentinels and the Redis servers, a wrong one of each refused at startup
+without being printed, and its primary killed and replaced
+(`apps/mount-rs-cli/tests/redis_sentinel.rs`). Not tested: a partition of
+the server-to-server link, a partition inside a Redis Sentinel deployment,
+a sentinel that names a server it should not, and a hostile peer that
+holds a valid key.
 
 ## Hardening checklist
 

@@ -184,7 +184,15 @@ impl OwnedVolumeRegistration {
     /// Reconcile an advisory route after loss or an uncertain Redis update.
     /// The caller controls backoff/retry and readiness; this never acquires a
     /// filesystem lease or retries a filesystem operation. An observed route
-    /// belonging to another registration is left untouched.
+    /// with this fence or a higher one that belongs to another registration
+    /// is left untouched and is a conflict.
+    ///
+    /// A route with a lower fence is a predecessor's: its lease ended before
+    /// this one was granted, so it is replaced, exactly as the first
+    /// advertisement replaces it. Such a record can appear after this
+    /// registration was published: a Redis replica promoted by a failover
+    /// may never have received the publication, and still hold the record
+    /// it replaced until that expires.
     pub async fn reconcile(&self) -> Result<(), RegistrationError> {
         self.check_owner().await?;
         let current = self
@@ -195,6 +203,7 @@ impl OwnedVolumeRegistration {
         match current {
             None => self.advertise().await,
             Some(route) if route == self.route => self.refresh().await,
+            Some(route) if route.fence < self.route.fence => self.advertise().await,
             Some(_) => Err(RegistrationError::Conflict),
         }
     }

@@ -1040,9 +1040,10 @@ a value out of range is refused at startup (exit code 2), and
 | `certificate` | path | required | | This server's peer certificate (PEM). Read once at startup. |
 | `private_key` | path | required | | Its private key (PEM). Read once at startup. |
 | `ca` | path | required | | CA certificates (PEM) that peer certificates must chain to. Read once at startup. |
-| `redis_url` | `{"env": "NAME"}` | required | | The environment variable holding the Redis URL. A literal URL is refused. |
-| `redis_ca` | path | system roots | | CA certificates (PEM) trusted for a `rediss://` server, instead of the system roots. Read once at startup. |
-| `allow_plaintext_redis` | boolean | `false` | | Permit `redis://` to a host other than this one. |
+| `redis_url` | `{"env": "NAME"}` | one of the two is required | | The environment variable holding the URL of a single Redis server. A literal URL is refused. Cannot be combined with `redis_sentinel`. |
+| `redis_sentinel` | object | one of the two is required | | A Redis Sentinel deployment instead of a single server. See [Redis Sentinel](#redis-sentinel). Cannot be combined with `redis_url`. |
+| `redis_ca` | path | system roots | | CA certificates (PEM) trusted for a TLS Redis server, and for the sentinels, instead of the system roots. Read once at startup. |
+| `allow_plaintext_redis` | boolean | `false` | | Permit an unencrypted connection to a Redis server, or a sentinel, on a host other than this one. |
 | `namespace` | string | required | 1-256 characters from `A-Z a-z 0-9 - _ .` | Prefix of this cluster's Redis keys. The same on every server of a cluster; different for clusters sharing a Redis. |
 | `bind` | UDP socket address | required | | Local address of the socket this server makes peer connections from. Use port `0`. (An owner *listens* on the `address` of its membership record, not here.) |
 | `owner` | boolean | `false` | | Own and serve the drives in `http.drives`, and accept forwarded requests for them. Requires `splitstore` drives. Without it `drives` must be `[]`. |
@@ -1312,7 +1313,7 @@ in the CLI README. For operation:
 
 | Requirement | Detail |
 | --- | --- |
-| One endpoint | Each server connects to the single address in its URL and reconnects to that same address. **Redis Sentinel and Redis Cluster addresses are not supported.** |
+| One primary | With `redis_url` each server connects to the single address in its URL and reconnects to that same address. With `redis_sentinel` it finds the primary through the sentinels and finds the new one after a failover; see [Redis Sentinel](#redis-sentinel). **Redis Cluster is not supported.** |
 | TLS | `rediss://` for any Redis not on the same host. The certificate must chain to the system roots or `redis_ca` and name the host in the URL. Verification cannot be turned off. Client certificates are not supported. |
 | Plaintext | `redis://` is accepted only to loopback, unless `allow_plaintext_redis: true`. |
 | Authentication | In the URL. This ACL is enough without failover, and is the one the TLS test uses: `~mount-rs:* +eval +getrange +get +set +del +pexpire +strlen +ping +client\|setinfo`. Failover also runs `TIME`, `ZADD`, `ZCARD`, `ZSCORE`, `ZRANGE`, `ZREM` and `ZREMRANGEBYSCORE` on keys under the same prefix; add `+time +zadd +zcard +zscore +zrange +zrem +zremrangebyscore`. That longer rule is read from the code and is **not** covered by a test: failover is tested with the default user. |
@@ -1332,12 +1333,124 @@ seconds, by `apps/mount-rs-cli/tests/redis_connection.rs`):
   owner dies during the outage, its drive stays unavailable until Redis is
   back.
 
-High availability: put Redis behind one stable name or address that always
-reaches the current primary (a managed service's primary endpoint, or a
-virtual address your tooling moves). **Not tested:** a replicated pair
-failing over, Sentinel, Redis Cluster, a proxy in front of Redis,
-reconnecting to an address that still resolves to a demoted read-only
-replica, Unix sockets, and a certificate whose name does not match.
+High availability: use [Redis Sentinel](#redis-sentinel), which is tested.
+The alternative is one stable name or address that always reaches the
+current primary (a managed service's primary endpoint, or a virtual address
+your tooling moves) in `redis_url`. **Not tested:** that alternative across
+a failover, Redis Cluster (not supported), a proxy in front of Redis, a
+`redis_url` that still resolves to a demoted read-only replica, Unix
+sockets, and a certificate whose name does not match.
+
+### Redis Sentinel
+
+A single Redis is a single point of failure for route lookups and for
+failover: while it is down, owners keep serving their own listeners, but
+nothing is forwarded and no standby takes a drive. A Sentinel deployment
+(one primary, one or more replicas, three or more sentinels) removes it.
+
+```json
+"forwarding": {
+  "redis_sentinel": {
+    "sentinels": ["10.0.2.11:26379", "10.0.2.12:26379", "10.0.2.13:26379"],
+    "service": "mount-rs",
+    "password": {"env": "MOUNT_RS_REDIS_PASSWORD"},
+    "sentinel_password": {"env": "MOUNT_RS_SENTINEL_PASSWORD"}
+  },
+  "redis_ca": "/etc/mount-rs/tls/redis-ca.pem"
+}
+```
+
+| `redis_sentinel` key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `sentinels` | array of `"host:port"` | required | 1 to 16 sentinels, each listed once. List all of them: a server asks them in turn and needs one that answers. An IPv6 address is written `"[2001:db8::1]:26379"`. The list is read at startup. |
+| `service` | string | required | The name the sentinels monitor the primary under (`sentinel monitor <service> ...`). Letters, digits, `.`, `-`, `_`. |
+| `tls` | boolean | `true` | TLS to the sentinels **and** to the Redis servers. There is one setting for both. |
+| `username`, `password` | string, `{"env": "NAME"}` | none | Credentials for the Redis servers (`requirepass`, or an ACL user). `username` requires `password`. |
+| `sentinel_username`, `sentinel_password` | string, `{"env": "NAME"}` | none | Credentials for the sentinels, which have their own (`requirepass` in the sentinel configuration). Not taken from `password`: set both if they are the same. |
+| `database` | integer | `0` | The database on the Redis servers. |
+
+Rules, checked at startup (exit status 2 for a configuration that breaks
+one):
+
+- `redis_url` and `redis_sentinel` cannot both be set, and one must be.
+- With `tls: false`, every sentinel must be on this host (`localhost` or a
+  loopback address) unless `allow_plaintext_redis` is `true`. The same rule
+  is applied to the address a sentinel names for the primary, when it is
+  named: a plaintext primary on another host is refused.
+- `redis_ca` requires `tls` to be on. It is the only trust root for the
+  sentinels and the Redis servers alike.
+- A password is named by its environment variable and never written.
+
+Deploying:
+
+1. Run Redis as one primary and at least one replica, and at least three
+   sentinels on separate hosts, as the Redis documentation describes. No
+   persistence is needed.
+2. **The address the sentinels report must be reachable from every
+   mount-rs server**, and with TLS the Redis certificates must be valid for
+   it. Sentinels report IP addresses unless `sentinel resolve-hostnames`
+   and `sentinel announce-hostnames` are on; behind NAT or in containers
+   set `replica-announce-ip`/`replica-announce-port` on the servers and
+   `sentinel announce-ip`/`announce-port` on the sentinels. Client
+   certificates are not supported (`tls-auth-clients no`).
+3. Give every mount-rs server the same `redis_sentinel` and `namespace`.
+4. Keep the Redis hosts' clocks in step with each other (NTP). Route and
+   announcement lifetimes are measured on the primary's clock.
+5. Optional, from Redis itself and not tested here:
+   `min-replicas-to-write 1` on the Redis servers makes a primary that has
+   lost its replicas refuse writes, which shortens the time a cut-off old
+   primary accepts publications nobody will read. It needs two replicas to
+   survive the loss of one server.
+
+An ACL user for the Redis servers needs `+role` in addition to the rule
+under Redis above, and one for the sentinels needs
+`+sentinel|get-master-addr-by-name +client|setinfo`. Both are read from the
+code and **not** covered by a test: the tests use the default user with a
+password.
+
+At startup a server asks the sentinels for the primary, connects and logs
+in to it, and requires it to report the `master` role, before it reports
+listening. It cannot start while no sentinel answers, while the service
+name is unknown to them, or while no primary is reachable (exit status 1;
+the message starts with `forwarding Redis Sentinel` and never contains a
+password).
+
+**What a failover of the Redis primary does** (measured with real servers
+by `apps/mount-rs-cli/tests/redis_sentinel.rs`; the figures and the
+reasoning are under
+["Redis Sentinel"](serve-http-failover.md#redis-sentinel) in the failover
+design):
+
+- No server exits and nothing needs restarting. Owners keep serving
+  requests that arrive at them for their own drives throughout.
+- From the loss of the primary until the sentinels have promoted a replica
+  and the servers have found it, requests that need forwarding get `503`
+  not-dispatched. In the test that was 3 to 7 seconds with
+  `down-after-milliseconds 2000`; a client repeating one forwarded read
+  went at most 4 seconds without an answer. Your `down-after-milliseconds`
+  sets most of it.
+- Servers find the new primary by themselves: on the first failed command,
+  or within about a second for a server that only reads. They never use a
+  replica.
+- **The promoted replica may be missing the last publications**, because
+  Redis replicates asynchronously. A missing route is published again
+  within one refresh interval (5 seconds; 0.6 to 3 seconds in the test).
+  An older route that the promoted replica still held is replaced within
+  the same interval; requests forwarded to the server it named in between
+  are refused or fail, and are never served by a server that does not hold
+  the drive's lease.
+- With `failover`, no drive changes owner because of a Redis failover: the
+  lease is in storage. A standby may log `lease_held` once if it read "no
+  route" in the gap.
+- The old primary, when it returns, is made a replica by the sentinels and
+  loses whatever it accepted while cut off. Servers do not go back to it.
+
+**Limits.** Redis Cluster is not supported. The sentinel list is fixed at
+startup: after replacing sentinels, update the configuration and restart
+the servers one at a time. Not tested: a network partition inside the
+Redis deployment (as opposed to a killed primary), Redis hosts with
+different clocks, an ACL user, sentinels reporting host names, and a
+managed service's Sentinel-compatible endpoint.
 
 ### Placement and failover
 
@@ -1463,6 +1576,7 @@ binary replaced in between.
 | The same for a drive id nobody configured | Expected: a cluster cannot tell an unknown drive from one that is down | Fix the client. |
 | `502` with `x-mount-dispatch: unknown` in bursts | An owner crashed or was removed from the membership with requests in flight; or its route outlived it (up to 15 s) | None for the server. Clients re-read or repeat with preconditions. |
 | `502` on every request through one new server | The owners have not loaded a membership file that lists it | Distribute the file and `SIGHUP` them. |
+| Start fails, code 1, `forwarding Redis Sentinel: no primary for service ...` | No sentinel answered (address, CA, `sentinel_password`), the service name is not the one the sentinels monitor, or the primary they name is unreachable or refuses the login (`password`, an address not reachable from this server) | The end of the message says which. A deployment in the middle of a failover has no primary for a few seconds; start again. |
 | Start fails, code 1, naming Redis (`rediss://host:port`) | Redis unreachable, wrong CA, wrong or missing password | Fix as the message says. The URL's credentials are never printed. |
 | Start fails, code 2, `config.http.forwarding...` | A key out of range, `failover` without `owner`, `memory` metadata with failover, a `token.file`, a non-`splitstore` drive | Fix the config; `validate-config` reports the same. |
 | `membership reload refused` on stderr | The new file is invalid or would cut this server off | Fix the file. The old membership is still in force. |
@@ -1491,9 +1605,13 @@ Stated plainly. None of these is hidden behind a feature flag.
    published releases has not been run; rehearse it, or stop every server.
    A peer of an incompatible protocol version is refused with `503`, not
    misread.
-5. **Redis high availability is not tested.** One endpoint only; no
-   Sentinel, no Redis Cluster. Behaviour across a replica promotion is
-   inferred from the outage tests, not measured.
+5. **Redis high availability means Redis Sentinel.** A failover of the
+   primary is tested with a killed primary and three sentinels; a
+   partition inside the Redis deployment is not. Redis Cluster is not
+   supported. During a Redis failover forwarded requests get `503` for as
+   long as the sentinels take, and for up to 5 seconds after it a route can
+   be missing or name the previous owner; see
+   [Redis Sentinel](#redis-sentinel).
 6. **The route lifetime is fixed at 15 seconds.** For that long after an
    owner crashes, forwarded requests for its drives wait on the dead owner
    (up to 30 seconds each) and then get `502`. Clients need their own

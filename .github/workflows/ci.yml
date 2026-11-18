@@ -1061,6 +1061,16 @@ jobs:
         # routes and forwarding responses of openapi-cluster.yaml. The tests
         # of this file that need no Redis also run in the workspace job.
         run: cargo test --locked -p mount-rs-cli --test cluster_contract -- --include-ignored
+      - name: Test a Redis Sentinel registry through a failover of its primary
+        env:
+          MOUNT_RS_REDIS_SENTINEL_TEST_IMAGE: redis:8.4@sha256:319f54e668c14f68cee51d1fdf9dba699deecac048fc0e52962433a3ef5562c0
+        # Real servers on a Sentinel deployment the tests start themselves
+        # with scripts/redis-sentinel-fixture.sh (one primary, two replicas
+        # and three sentinels in one container): the primary is killed and a
+        # replica promoted, with and without TLS and passwords, with a
+        # static owner and with failover candidates. The tests fail, and are
+        # not skipped, if Docker or the image is unavailable.
+        run: cargo test --locked -p mount-rs-cli --test redis_sentinel -- --include-ignored
 
   cluster-mixed-release:
     # A forwarding cluster with one server on this commit and one on an

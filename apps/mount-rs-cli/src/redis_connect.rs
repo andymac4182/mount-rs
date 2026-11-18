@@ -4,14 +4,26 @@
 //! nothing here formats the URL itself: errors name the [`RedisTarget`], which
 //! is the scheme, host and port only, and any text that came from the Redis
 //! client is scrubbed of the password before it is reported.
-use crate::{config::ForwardingConfig, runtime::CliError};
+//!
+//! With `http.forwarding.redis_sentinel` the registry is the primary of a
+//! Redis Sentinel deployment instead. The sentinels and the servers they
+//! name are held to the same rules: TLS that cannot be turned off, the same
+//! optional CA, and no plaintext to another host without the opt-in.
+use crate::{
+    config::{ForwardingConfig, RedisSentinelConfig, is_loopback_host, is_plain_host},
+    runtime::CliError,
+};
 use redis::{ConnectionAddr, ConnectionInfo, IntoConnectionInfo};
-use std::{fmt, net::IpAddr, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 /// How long startup waits for the first connection, handshake and login.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The registry's bound on each Redis command.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// The bound on each step of finding the primary through the sentinels:
+/// connecting to a sentinel, its answer, connecting to the server it names
+/// and that server's answer.
+const SENTINEL_STEP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Where a Redis URL points, without its credentials, database or query.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,29 +166,24 @@ fn endpoint(host: &str, port: u16) -> String {
     }
 }
 
-/// Whether `host` can only be this machine. A name other than `localhost`
-/// is never assumed to be, whatever it resolves to.
-fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
-}
-
 /// Connect to the registry named by `config`, enforcing the URL policy.
 pub(crate) async fn connect_registry(
     config: &ForwardingConfig,
 ) -> Result<mount_rs_cluster::RedisRouteRegistry, CliError> {
-    let url = std::env::var(&config.redis_url.name).map_err(|_| {
-        CliError::runtime(format!(
-            "missing environment variable {}",
-            config.redis_url.name
-        ))
-    })?;
     let ca = match &config.redis_ca {
         None => None,
         Some(path) => Some(read_ca(path)?),
     };
+    if let Some(sentinel) = &config.redis_sentinel {
+        return connect_sentinel(config, sentinel, ca).await;
+    }
+    let Some(redis_url) = &config.redis_url else {
+        // Configuration parsing requires one of the two.
+        return Err(CliError::usage(
+            "http.forwarding requires redis_url or redis_sentinel",
+        ));
+    };
+    let url = env_value(&redis_url.name)?;
     let checked = CheckedRedisUrl::parse(&url, config.allow_plaintext_redis, ca.is_some())
         .map_err(|error| CliError::usage(error.to_string()))?;
     let client = connect(&checked, ca).await.map_err(CliError::runtime)?;
@@ -189,6 +196,191 @@ pub(crate) async fn connect_registry(
         REQUEST_TIMEOUT,
     )
     .map_err(|e| CliError::runtime(e.to_string()))
+}
+
+fn env_value(name: &str) -> Result<String, CliError> {
+    std::env::var(name)
+        .map_err(|_| CliError::runtime(format!("missing environment variable {name}")))
+}
+
+/// The TLS setting, credentials and address rules shared by every
+/// connection of a Sentinel deployment. `Debug` is not derived: this holds
+/// passwords.
+struct SentinelPolicy {
+    tls: bool,
+    allow_plaintext: bool,
+    ca: Option<Vec<u8>>,
+    /// For the Redis servers.
+    data: redis::RedisConnectionInfo,
+    /// For the sentinels.
+    sentinel: redis::RedisConnectionInfo,
+    /// Every password in use, for scrubbing error text.
+    secrets: Vec<String>,
+}
+
+impl SentinelPolicy {
+    fn new(
+        config: &RedisSentinelConfig,
+        allow_plaintext: bool,
+        ca: Option<Vec<u8>>,
+        password: Option<String>,
+        sentinel_password: Option<String>,
+    ) -> Self {
+        let settings = |username: &Option<String>, password: &Option<String>| {
+            let mut settings = redis::RedisConnectionInfo::default();
+            if let Some(username) = username {
+                settings = settings.set_username(username);
+            }
+            if let Some(password) = password {
+                settings = settings.set_password(password);
+            }
+            settings
+        };
+        Self {
+            tls: config.tls,
+            allow_plaintext,
+            data: settings(&config.username, &password).set_db(i64::from(config.database)),
+            // A sentinel has no databases to select.
+            sentinel: settings(&config.sentinel_username, &sentinel_password),
+            secrets: [password, sentinel_password]
+                .into_iter()
+                .flatten()
+                .filter(|secret| !secret.is_empty())
+                .collect(),
+            ca,
+        }
+    }
+
+    fn target(&self, host: &str, port: u16) -> RedisTarget {
+        RedisTarget {
+            tls: self.tls,
+            endpoint: endpoint(host, port),
+            unix: false,
+        }
+    }
+
+    fn scrub(&self, text: &str) -> String {
+        self.secrets.iter().fold(text.to_owned(), |text, secret| {
+            text.replace(secret, "[redacted]")
+        })
+    }
+
+    /// A client for `host:port`, which is a sentinel or a server one named.
+    /// The address is refused if it is not a plain host name or IP address,
+    /// or if reaching it would be plaintext to another host without the
+    /// opt-in. The error text is safe to print.
+    fn client(
+        &self,
+        host: &str,
+        port: u16,
+        settings: &redis::RedisConnectionInfo,
+    ) -> Result<redis::Client, String> {
+        let target = self.target(host, port);
+        let literal = host.parse::<std::net::Ipv6Addr>().is_ok();
+        if port == 0 || !(literal || is_plain_host(host)) {
+            return Err("a sentinel named an address that is not a host and port".to_owned());
+        }
+        if !self.tls && !self.allow_plaintext && !is_loopback_host(host) {
+            return Err(format!(
+                "refusing an unencrypted Redis connection to {target}: leave \
+                 http.forwarding.redis_sentinel.tls on, or set \
+                 http.forwarding.allow_plaintext_redis to true if the network between this \
+                 server, the sentinels and the Redis servers is trusted"
+            ));
+        }
+        let configure = |error: redis::RedisError| {
+            format!(
+                "forwarding Redis connection to {target} cannot be configured: {}",
+                self.scrub(&error.to_string())
+            )
+        };
+        // The scheme decides TLS; the address was checked above and holds
+        // no credentials.
+        let info = target
+            .to_string()
+            .into_connection_info()
+            .map_err(configure)?
+            .set_redis_settings(settings.clone());
+        build_client(info, self.ca.clone()).map_err(configure)
+    }
+}
+
+/// Connect to the primary of the Sentinel deployment named by `sentinel`.
+async fn connect_sentinel(
+    config: &ForwardingConfig,
+    sentinel: &RedisSentinelConfig,
+    ca: Option<Vec<u8>>,
+) -> Result<mount_rs_cluster::RedisRouteRegistry, CliError> {
+    let secret = |reference: &Option<crate::config::EnvReference>| {
+        reference
+            .as_ref()
+            .map(|reference| env_value(&reference.name))
+            .transpose()
+    };
+    let policy = Arc::new(SentinelPolicy::new(
+        sentinel,
+        config.allow_plaintext_redis,
+        ca,
+        secret(&sentinel.password)?,
+        secret(&sentinel.sentinel_password)?,
+    ));
+    if policy.tls {
+        // See `connect`: one TLS provider has to be chosen for the client.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+    let sentinels = sentinel
+        .sentinels
+        .iter()
+        .map(|address| policy.client(&address.host, address.port, &policy.sentinel))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CliError::usage)?;
+    let count = sentinels.len();
+    let factory = policy.clone();
+    let primary = mount_rs_cluster::SentinelPrimary::new(
+        sentinels,
+        sentinel.service.clone(),
+        Arc::new(move |host, port| factory.client(host, port, &factory.data)),
+        SENTINEL_STEP_TIMEOUT,
+    )
+    .ok_or_else(|| CliError::usage("invalid http.forwarding.redis_sentinel"))?;
+    // Find the primary once before reporting ready, so that a wrong
+    // address, service name, certificate or password is reported here.
+    let failed = |detail: String| {
+        CliError::runtime(format!(
+            "forwarding Redis Sentinel: no primary for service {:?} through {count} \
+             sentinel(s): {}",
+            sentinel.service,
+            policy.scrub(&detail)
+        ))
+    };
+    let resolved = tokio::time::timeout(CONNECT_TIMEOUT * 3, primary.resolve())
+        .await
+        .map_err(|_| failed("timed out".to_owned()))?
+        .map_err(|error| failed(error.to_string()))?;
+    mount_rs_cluster::RedisRouteRegistry::with_sentinel(
+        primary,
+        Some(resolved),
+        config.namespace.clone(),
+        REQUEST_TIMEOUT,
+    )
+    .map_err(|e| CliError::runtime(e.to_string()))
+}
+
+/// A client that trusts only `ca` when one is given, and the system roots
+/// otherwise.
+fn build_client(info: ConnectionInfo, ca: Option<Vec<u8>>) -> redis::RedisResult<redis::Client> {
+    match ca {
+        // With a CA, only that bundle is trusted for this connection.
+        Some(root_cert) => redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert: Some(root_cert),
+            },
+        ),
+        // Without one, a TLS server is verified against the system roots.
+        None => redis::Client::open(info),
+    }
 }
 
 /// Read a PEM bundle and require at least one certificate in it, so that a
@@ -222,19 +414,7 @@ async fn connect(checked: &CheckedRedisUrl, ca: Option<Vec<u8>>) -> Result<redis
         // to be chosen. An error only means one is already installed.
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
-    let client = match ca {
-        // With a CA, only that bundle is trusted for this connection.
-        Some(root_cert) => redis::Client::build_with_tls(
-            checked.info.clone(),
-            redis::TlsCertificates {
-                client_tls: None,
-                root_cert: Some(root_cert),
-            },
-        ),
-        // Without one, a rediss:// server is verified against the system roots.
-        None => redis::Client::open(checked.info.clone()),
-    }
-    .map_err(|error| {
+    let client = build_client(checked.info.clone(), ca).map_err(|error| {
         format!(
             "forwarding Redis connection to {target} cannot be configured: {}",
             checked.scrub(&error.to_string())
@@ -483,6 +663,107 @@ mod tests {
             assert!(!error.contains(PASSWORD), "{error}");
             assert!(!error.contains("svc"), "{error}");
         }
+    }
+
+    fn policy(tls: bool, allow_plaintext: bool) -> SentinelPolicy {
+        let config = RedisSentinelConfig {
+            sentinels: Vec::new(),
+            service: "mount-rs".into(),
+            tls,
+            username: Some("registry-user".into()),
+            password: None,
+            sentinel_username: None,
+            sentinel_password: None,
+            database: 2,
+        };
+        SentinelPolicy::new(
+            &config,
+            allow_plaintext,
+            None,
+            Some(PASSWORD.into()),
+            Some("s3ntinel-pass".into()),
+        )
+    }
+
+    #[test]
+    fn a_server_named_by_a_sentinel_is_held_to_the_plaintext_rule() {
+        let strict = policy(false, false);
+        for local in ["127.0.0.1", "localhost", "::1"] {
+            assert!(strict.client(local, 6379, &strict.data).is_ok(), "{local}");
+        }
+        for remote in ["10.0.0.5", "redis-1.internal", "2001:db8::1"] {
+            let error = strict.client(remote, 6379, &strict.data).unwrap_err();
+            assert!(error.contains("refusing an unencrypted"), "{error}");
+            assert!(error.contains("allow_plaintext_redis"), "{error}");
+            assert!(!error.contains(PASSWORD), "{error}");
+            assert!(
+                policy(false, true)
+                    .client(remote, 6379, &strict.data)
+                    .is_ok()
+            );
+            assert!(
+                policy(true, false)
+                    .client(remote, 6379, &strict.data)
+                    .is_ok()
+            );
+        }
+        assert!(
+            strict
+                .client("10.0.0.5", 6379, &strict.data)
+                .unwrap_err()
+                .contains("redis://10.0.0.5:6379")
+        );
+    }
+
+    #[test]
+    fn a_sentinel_cannot_name_anything_but_a_host_and_port() {
+        let open = policy(true, true);
+        for host in [
+            "",
+            "user:secret@evil.example",
+            "evil.example/0",
+            "evil.example#insecure",
+            "evil.example?x=1",
+            "a b",
+            "[::1]",
+        ] {
+            assert!(open.client(host, 6379, &open.data).is_err(), "{host:?}");
+        }
+        assert!(open.client("redis-1.internal", 0, &open.data).is_err());
+    }
+
+    #[test]
+    fn sentinel_clients_carry_the_right_credentials_and_tls() {
+        let tls = policy(true, false);
+        let data = tls.client("10.0.0.5", 6380, &tls.data).unwrap();
+        let info = data.get_connection_info();
+        assert!(matches!(
+            info.addr(),
+            ConnectionAddr::TcpTls { host, port: 6380, insecure: false, .. } if host == "10.0.0.5"
+        ));
+        assert_eq!(info.redis_settings().username(), Some("registry-user"));
+        assert_eq!(info.redis_settings().password(), Some(PASSWORD));
+        assert_eq!(info.redis_settings().db(), 2);
+        // The sentinels get their own password and no database.
+        let sentinel = tls.client("2001:db8::7", 26379, &tls.sentinel).unwrap();
+        let info = sentinel.get_connection_info();
+        assert!(matches!(
+            info.addr(),
+            ConnectionAddr::TcpTls { host, port: 26379, .. } if host == "2001:db8::7"
+        ));
+        assert_eq!(info.redis_settings().username(), None);
+        assert_eq!(info.redis_settings().password(), Some("s3ntinel-pass"));
+        assert_eq!(info.redis_settings().db(), 0);
+        let plain = policy(false, false);
+        let local = plain.client("127.0.0.1", 6379, &plain.data).unwrap();
+        assert!(matches!(
+            local.get_connection_info().addr(),
+            ConnectionAddr::Tcp(host, 6379) if host == "127.0.0.1"
+        ));
+        assert_eq!(
+            plain.scrub(&format!("AUTH {PASSWORD} then s3ntinel-pass")),
+            "AUTH [redacted] then [redacted]"
+        );
     }
 
     #[test]

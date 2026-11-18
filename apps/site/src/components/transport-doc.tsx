@@ -978,8 +978,12 @@ curl -H 'Authorization: Bearer demo-memory' \
         with exclusive ownership, and cannot move a drive before the failed
         owner’s storage lease expires (240 s by default); requests in flight
         and sessions on the failed owner are lost, not replayed; nothing
-        checks that candidates point at the same storage; and Redis Sentinel
-        and Redis Cluster are not supported. The session routes, the
+        checks that candidates point at the same storage. The route registry
+        is one Redis server or the primary of a Redis Sentinel deployment;
+        Redis Cluster is not supported. While Redis fails over, requests
+        that need forwarding get <code>503</code>, and for up to five
+        seconds afterwards a route can be missing or name the previous
+        owner, which never serves it. The session routes, the
         cluster configuration and what a client sees from a cluster are
         covered by the compatibility policy and checked by tests; the
         server-to-server protocol is internal and carries a version: a
@@ -1011,9 +1015,13 @@ curl -H 'Authorization: Bearer demo-memory' \
         up on the first. That run predates the <code>cluster-mixed-release</code>{' '}
         job, which runs the cluster test with one server on the current
         commit and one on <code>031050cc</code>. Not covered: clusters of mixed releases built from
-        two published releases; Redis
-        Sentinel and Redis Cluster; and any deployed collector, dashboard or
-        pager.{' '}
+        two published releases; Redis Cluster, which is not supported; a
+        network partition inside a Redis Sentinel deployment; and any
+        deployed collector, dashboard or pager. That run also predates the
+        Redis Sentinel step of <code>cluster-http3</code>, which kills the
+        primary of a deployment with two replicas and three sentinels under
+        real servers, with and without TLS and passwords; it has passed
+        locally and has no hosted run yet.{' '}
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,
         ranges, truncate, concurrent writes, restart/reopen, and cleanup. The
         optional <code>mount-rs-observability</code> seam can attach a

@@ -122,7 +122,8 @@ function ArchitecturePage() {
           <p>
             Limits: failover is opt-in and needs split-store drives; sessions
             and requests in flight on a failed owner are lost, not replayed;
-            Redis Sentinel and Redis Cluster are not supported; and servers of
+            the registry can be a Redis Sentinel deployment but not Redis
+            Cluster; and servers of
             different releases cannot share a cluster, because the
             server-to-server protocol is internal, so a cluster is upgraded by
             stopping every server. See the{' '}
