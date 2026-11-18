@@ -395,10 +395,20 @@ checks of `scripts/serve-http-cluster-e2e.py`.
 CI job `cluster-mixed-release` builds two binaries, the commit under test
 and a pinned **baseline**, and runs `scripts/serve-http-cluster-e2e.py`
 with the two in one cluster, twice: baseline as node a with the current
-build as nodes b and c, then the reverse. The baseline is `main` at
-`031050cc78032e4827b06264fd771344d1f6967a` (the merge of #148). It predates
-the version marker, so it sends no version header and writes no
-`protocols` field: this is the "no version means version 1" case.
+build as nodes b and c, then the reverse.
+
+The job chooses the baseline itself (`scripts/mixed-release-baseline.sh`):
+the newest `v*-cli-preview*` release, by version, that descends from a
+fixed floor commit and is not the commit under test. Until such a release
+exists the baseline is the floor: `main` at
+`031050cc78032e4827b06264fd771344d1f6967a` (the merge of #148). **That is
+the case today:** the published releases (up to `v0.2.0-cli-preview`) were
+cut before the floor, so every run so far has used the floor commit. It
+predates the version marker, so it sends no version header and writes no
+`protocols` field: this is the "no version means version 1" case. The job
+prints the baseline it used on a `MIXED_RELEASE_BASELINE` line and in its
+summary. From the first release cut after the floor, every later commit is
+tested with the newest release, without an edit to the workflow.
 
 Each run covers, between a server of one build and a server of the other:
 
@@ -420,8 +430,11 @@ Each run covers, between a server of one build and a server of the other:
 
 What this does **not** prove:
 
-- Anything about a **published release**. The baseline is a commit on
-  `main`, and no pair of releases has been run together.
+- Anything about a **published release**, yet. The baseline has so far
+  been a commit on `main`, and no pair of releases has been run together.
+  When the baseline is a release, the pair tested is that release with a
+  later commit of `main`; two releases have been run together only once
+  the later one's own commit has passed the job.
 - Any pair other than the one in the job, including builds older than the
   baseline.
 - A version change. Only version 1 exists, so the test proves that the
@@ -440,8 +453,8 @@ What this does **not** prove:
 
 - A cluster may run servers of **two adjacent releases** for the length of
   an upgrade. This is the intent from here on, and it is enforced by
-  moving the baseline of `cluster-mixed-release` to the previous release
-  whenever a release is cut. Until a release pair has passed that job,
+  `cluster-mixed-release`, whose baseline moves to the newest release by
+  itself when one is cut. Until a release pair has passed that job,
   treat a rolling upgrade between published releases as untested and
   rehearse it.
 - A release that changes what servers send each other raises the protocol

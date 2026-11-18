@@ -1648,7 +1648,9 @@ rolling upgrade procedure and the full-stop procedure.
 What is tested is one pair of builds: the current commit in a cluster with
 `main` at `031050cc`, in both arrangements (CI job `cluster-mixed-release`:
 forwarding, sessions, membership reload and failover hand-off between the
-two). No pair of published releases has been run together. The policy is
+two). The job takes the newest release cut after that commit as its
+baseline once one exists; none does yet, so no pair of published releases
+has been run together. The policy is
 that two adjacent releases may share a cluster for the length of an
 upgrade, one server at a time; any other pair is upgraded by stopping every
 server and starting every server on the new release.
