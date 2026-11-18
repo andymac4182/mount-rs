@@ -9,8 +9,12 @@
 //! answers `READONLY` or `MASTERDOWN` (it was demoted), when three commands
 //! in a row go unanswered, and when a periodic check finds that the
 //! sentinels name another server or that the connected one no longer
-//! reports `master`. A command that fails this way is not replayed: the
-//! caller sees the failure and reconciles, as after any Redis outage.
+//! reports `master`. The check runs about once a second while commands are
+//! sent; a command sent after more than two seconds without one waits up to
+//! half a second for a new check first, so a connection left idle while its
+//! server was cut off or demoted is not trusted once more. A command that
+//! fails this way is not replayed: the caller sees the failure and
+//! reconciles, as after any Redis outage.
 //!
 //! Redis replication is asynchronous, so the server a failover promotes can
 //! lack the last writes its predecessor acknowledged, and can still hold
@@ -310,6 +314,14 @@ async fn is_primary(connection: &mut MultiplexedConnection) -> redis::RedisResul
 const UNANSWERED_BEFORE_RESOLVE: u32 = 3;
 /// How often a connection in use is checked against the sentinels.
 const VERIFY_INTERVAL: Duration = Duration::from_secs(1);
+/// A command sent this long after the last check began waits for a new
+/// check before it is sent, so that a connection left idle while its
+/// server was cut off or demoted is not used once more on trust.
+const CHECK_OVERDUE_AFTER: Duration = Duration::from_secs(2);
+/// The longest such a command waits for that check. A check that cannot
+/// reach a sentinel in time is no evidence: the command is then sent on
+/// the connection it has, and the check goes on without it.
+const OVERDUE_CHECK_WAIT: Duration = Duration::from_millis(500);
 /// The pause after a lookup that found no primary, before the next may start.
 const FAILED_RESOLVE_PAUSE: Duration = Duration::from_millis(200);
 
@@ -329,6 +341,8 @@ struct Shared {
     verifying: AtomicBool,
     /// Milliseconds after `started` when the last periodic check began.
     verified_at: AtomicU64,
+    /// Signalled when a periodic check ends, whatever it found.
+    checked: tokio::sync::Notify,
     started: Instant,
     /// Signalled when a lookup ends, whatever it found.
     resolved: tokio::sync::Notify,
@@ -383,6 +397,7 @@ impl SentinelManager {
                 resolving: AtomicBool::new(false),
                 verifying: AtomicBool::new(false),
                 verified_at: AtomicU64::new(0),
+                checked: tokio::sync::Notify::new(),
                 started: Instant::now(),
                 resolved: tokio::sync::Notify::new(),
                 last_error: ArcSwap::from_pointee(String::from("not yet looked up")),
@@ -432,8 +447,21 @@ impl SentinelManager {
                 }
             }
         }
-        let generation = self.current().await?;
-        Shared::verify_if_due(&self.shared, &generation);
+        let mut generation = self.current().await?;
+        if self.shared.check_overdue() {
+            // Registered before the check starts, so a check that ends at
+            // once is not missed.
+            let checked = self.shared.checked.notified();
+            tokio::pin!(checked);
+            checked.as_mut().enable();
+            if Shared::verify_if_due(&self.shared, &generation) {
+                let _ = tokio::time::timeout(OVERDUE_CHECK_WAIT, checked).await;
+                // The check may have discarded the connection.
+                generation = self.current().await?;
+            }
+        } else {
+            Shared::verify_if_due(&self.shared, &generation);
+        }
         // Armed across the await: a caller's deadline drops this future,
         // and that is an unanswered command too.
         let mut watch = Watch {
@@ -476,6 +504,8 @@ impl SentinelManager {
 impl Shared {
     fn install(&self, resolved: ResolvedPrimary) {
         self.connections.fetch_add(1, Ordering::Relaxed);
+        // The lookup that found it was a check.
+        self.verified_at.store(self.now_ms(), Ordering::Relaxed);
         self.current.store(Some(Arc::new(Generation {
             address: resolved.address,
             connection: resolved.connection,
@@ -540,17 +570,18 @@ impl Shared {
     /// `master`. A demoted primary keeps answering reads, so nothing else
     /// would notice it on a connection that only reads. A check that cannot
     /// reach a sentinel or the server changes nothing: it is not evidence.
-    fn verify_if_due(shared: &Arc<Self>, generation: &Arc<Generation>) {
-        let now = u64::try_from(shared.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    /// Returns whether it started a check.
+    fn verify_if_due(shared: &Arc<Self>, generation: &Arc<Generation>) -> bool {
+        let now = shared.now_ms();
         let last = shared.verified_at.load(Ordering::Relaxed);
         if now.saturating_sub(last) < VERIFY_INTERVAL.as_millis() as u64 {
-            return;
+            return false;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
+            return false;
         };
         if shared.verifying.swap(true, Ordering::AcqRel) {
-            return;
+            return false;
         }
         shared.verified_at.store(now, Ordering::Relaxed);
         let shared = shared.clone();
@@ -560,6 +591,7 @@ impl Shared {
             impl Drop for Clear<'_> {
                 fn drop(&mut self) {
                     self.0.verifying.store(false, Ordering::Release);
+                    self.0.checked.notify_waiters();
                 }
             }
             let _clear = Clear(&shared);
@@ -579,6 +611,17 @@ impl Shared {
                 Self::discard(&shared, &generation);
             }
         });
+        true
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Whether no check has begun for longer than `CHECK_OVERDUE_AFTER`.
+    fn check_overdue(&self) -> bool {
+        let last = self.verified_at.load(Ordering::Relaxed);
+        self.now_ms().saturating_sub(last) >= CHECK_OVERDUE_AFTER.as_millis() as u64
     }
 }
 
@@ -873,6 +916,78 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert_eq!(manager.address(), None);
+    }
+
+    #[tokio::test]
+    async fn an_idle_connection_is_checked_before_it_is_used_again() {
+        // A primary cut off from the sentinels: it still answers as a
+        // primary, and the sentinels name another server meanwhile. Nothing
+        // is sent in between, so no periodic check runs.
+        let old = server("old");
+        let old_address = fake(old.clone()).await;
+        let new_address = fake(server("new")).await;
+        let sentinel = server("");
+        sentinel.names.store(old_address.port(), Ordering::Relaxed);
+        let manager = SentinelManager::new(primary_for(&[fake(sentinel.clone()).await]));
+        assert_eq!(get(&manager).await.unwrap(), "old");
+        sentinel.names.store(new_address.port(), Ordering::Relaxed);
+        tokio::time::sleep(CHECK_OVERDUE_AFTER + Duration::from_millis(100)).await;
+        // The first command after the pause already goes to the new one.
+        assert_eq!(get(&manager).await.unwrap(), "new");
+        assert_eq!(manager.connections(), 2);
+
+        // A primary demoted while idle, with a sentinel that still names
+        // it: the first command after the pause is not answered by the
+        // replica.
+        let stale = server("");
+        let demoted = server("demoted");
+        let demoted_address = fake(demoted.clone()).await;
+        stale.names.store(demoted_address.port(), Ordering::Relaxed);
+        let manager = SentinelManager::new(primary_for(&[fake(stale).await]));
+        assert_eq!(get(&manager).await.unwrap(), "demoted");
+        demoted.replica.store(true, Ordering::Relaxed);
+        tokio::time::sleep(CHECK_OVERDUE_AFTER + Duration::from_millis(100)).await;
+        let error = get(&manager).await.unwrap_err();
+        assert!(error.to_string().contains("master role"), "{error}");
+        assert_eq!(manager.address(), None);
+    }
+
+    #[tokio::test]
+    async fn an_overdue_check_that_reaches_no_sentinel_holds_a_command_back_briefly() {
+        // Resolved through a sentinel that answers; checked later through
+        // one that accepts and never answers.
+        let data = fake(server("value")).await;
+        let sentinel = server("");
+        sentinel.names.store(data.port(), Ordering::Relaxed);
+        let resolved = primary_for(&[fake(sentinel).await])
+            .resolve()
+            .await
+            .unwrap();
+        let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let silent_address = silent.local_addr().unwrap();
+        let held = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let keep = held.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = silent.accept().await {
+                keep.lock().await.push(stream);
+            }
+        });
+        let manager = SentinelManager::with_resolved(primary_for(&[silent_address]), resolved);
+        tokio::time::sleep(CHECK_OVERDUE_AFTER + Duration::from_millis(100)).await;
+        // No evidence against the connection: the command is sent on it,
+        // after at most the overdue wait.
+        let started = Instant::now();
+        assert_eq!(get(&manager).await.unwrap(), "value");
+        assert!(
+            started.elapsed() < OVERDUE_CHECK_WAIT + Duration::from_millis(400),
+            "{:?}",
+            started.elapsed()
+        );
+        // The check is under way; the next command does not wait again.
+        let started = Instant::now();
+        assert_eq!(get(&manager).await.unwrap(), "value");
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert_eq!(manager.connections(), 1);
     }
 
     #[tokio::test]

@@ -91,7 +91,7 @@ node benchmarks/storage/runner.mjs \
   --providers mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 \
   --sizes 1 --payload-bytes 4096 \
   --iterations 400 --concurrency 64 --min-iops 1000 \
-  --require-configured \
+  --require-configured --flush-writeback \
   --output artifacts/ozone-iops.json
 ```
 
@@ -104,6 +104,17 @@ selector remains in the JSON for schema compatibility, while
 controlled CI/provider qualification measurement; it is not proof that every
 customer Ozone deployment can sustain 1,000 IOPS or meet the customer's
 99.99%/RPO/RTO objectives.
+
+`--flush-writeback` runs `sync` before each timed window, so the window does
+not also pay for writing back what earlier steps left in the page cache
+(build output, container writes); everything the measured provider writes is
+still inside the window. Each result records what the sync drained
+(`preMeasurement`), the host's I/O, CPU and memory pressure-stall time and
+page-cache backlog across the window (`hostConditions`, Linux only, null
+elsewhere), each operation's start offset in the window
+(`writeStartedAtMs`, `readStartedAtMs`, `deleteStartedAtMs`) and the slowest
+operations (`slowestOperations`). A result below the target also prints one
+`STORAGE_IOPS_SLOW` line with the same facts to stderr.
 
 The W26 shell lanes reject a weakened production profile and run
 `scripts/verify-w26-ozone-iops-artifact.mjs` before emitting their provider

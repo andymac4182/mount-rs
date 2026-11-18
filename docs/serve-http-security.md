@@ -260,10 +260,14 @@ Redis during a failover (`apps/mount-rs-cli/tests/failover.rs`); a Redis
 Sentinel deployment with TLS, a private CA and separate passwords for the
 sentinels and the Redis servers, a wrong one of each refused at startup
 without being printed, and its primary killed and replaced
-(`apps/mount-rs-cli/tests/redis_sentinel.rs`). Not tested: a partition of
-the server-to-server link, a partition inside a Redis Sentinel deployment,
-a sentinel that names a server it should not, and a hostile peer that
-holds a valid key.
+(`apps/mount-rs-cli/tests/redis_sentinel.rs`); ACL users on the Redis
+servers and the sentinels with only the documented commands (same file);
+partitions inside a Sentinel deployment, including an isolated old primary
+that keeps accepting writes and a split brain with failover candidates on
+both sides, during which no drive changed owner
+(`apps/mount-rs-cli/tests/redis_sentinel_partition.rs`). Not tested: a
+partition of the server-to-server link, a sentinel that names a server it
+should not, and a hostile peer that holds a valid key.
 
 ## Hardening checklist
 

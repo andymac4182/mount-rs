@@ -156,7 +156,7 @@ const routes = [
     path: '/docs/transports/http',
     status: 200,
     contentType: 'text/html',
-    expected: ['HTTP multi-drive API', '/v1/drives', 'Validated', '44206434960', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'clusters of mixed releases', 'cluster-mixed-release', 'refuses a peer whose version it does not speak', 'the primary of a Redis Sentinel deployment', 'Redis Cluster is not supported'],
+    expected: ['HTTP multi-drive API', '/v1/drives', 'Validated', '44206434960', 'X-Request-Id', 'next_cursor', 'max_directory_entries', 'token_reload_seconds', 'drive_shutdown_timeout_ms', 'OpenAPI conformance test', 'serve-http-failover.md', 'clusters of mixed releases', 'cluster-mixed-release', 'refuses a peer whose version it does not speak', 'the primary of a Redis Sentinel deployment', 'Redis Cluster is not supported', 'partitions a Redis'],
   },
   {
     path: '/docs/transports/webdav',

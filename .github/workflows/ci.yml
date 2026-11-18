@@ -1082,9 +1082,22 @@ jobs:
         # with scripts/redis-sentinel-fixture.sh (one primary, two replicas
         # and three sentinels in one container): the primary is killed and a
         # replica promoted, with and without TLS and passwords, with a
-        # static owner and with failover candidates. The tests fail, and are
+        # static owner, with failover candidates, and with ACL users that
+        # hold only the commands the runbook lists. The tests fail, and are
         # not skipped, if Docker or the image is unavailable.
         run: cargo test --locked -p mount-rs-cli --test redis_sentinel -- --include-ignored
+      - name: Test partitions inside a Redis Sentinel deployment
+        env:
+          MOUNT_RS_REDIS_SENTINEL_TEST_IMAGE: redis:8.4@sha256:319f54e668c14f68cee51d1fdf9dba699deecac048fc0e52962433a3ef5562c0
+          MOUNT_RS_SENTINEL_TEST_NET_IMAGE: alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
+        # The same deployment with links that can be cut: iptables, in a
+        # second container sharing the Redis container's network namespace,
+        # drops packets between chosen Redis processes or from the host.
+        # An old primary cut off but still accepting writes, a split brain
+        # with failover candidates on both sides, and servers cut off from
+        # the primary or from the sentinels. One test at a time: each holds
+        # a deployment and three servers for one to two minutes.
+        run: cargo test --locked -p mount-rs-cli --test redis_sentinel_partition -- --include-ignored --test-threads=1
 
   cluster-mixed-release:
     # A forwarding cluster with one server on this commit and one on an
@@ -1107,16 +1120,19 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 15
     env:
-      # The earlier release: main at the merge of #148, before the peer
-      # protocol version marker existed. Move it forward to the previous
-      # release when a release is cut; see "Clusters" in
-      # docs/serve-http-upgrade.md, which names this commit.
-      MIXED_RELEASE_BASELINE: 031050cc78032e4827b06264fd771344d1f6967a
+      # The floor of the earlier release: main at the merge of #148, before
+      # the peer protocol version marker existed. The baseline is the newest
+      # v*-cli-preview* release that descends from it, and this commit
+      # itself until such a release exists
+      # (scripts/mixed-release-baseline.sh), so it moves when a release is
+      # cut. See "Clusters" in docs/serve-http-upgrade.md, which names this
+      # commit.
+      MIXED_RELEASE_FLOOR: 031050cc78032e4827b06264fd771344d1f6967a
       MOUNT_RS_REDIS_URL: redis://127.0.0.1:6379/
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          # The baseline commit must be in the clone.
+          # The floor commit and the release tags must be in the clone.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
@@ -1126,7 +1142,12 @@ jobs:
         # From its own checkout and into its own target directory, so that
         # neither build can hand the other a stale artifact.
         run: |
-          git worktree add --detach "$RUNNER_TEMP/baseline" "$MIXED_RELEASE_BASELINE"
+          bash scripts/test-mixed-release-baseline.sh
+          git fetch --force --tags origin
+          baseline="$(bash scripts/mixed-release-baseline.sh "$MIXED_RELEASE_FLOOR")"
+          echo "MIXED_RELEASE_BASELINE $baseline"
+          echo "Mixed-release baseline: \`$baseline\`" >> "$GITHUB_STEP_SUMMARY"
+          git worktree add --detach "$RUNNER_TEMP/baseline" "${baseline%% *}"
           cd "$RUNNER_TEMP/baseline"
           CARGO_TARGET_DIR="$RUNNER_TEMP/baseline-target" cargo build --locked --release -p mount-rs-cli
           "$RUNNER_TEMP/baseline-target/release/mount-rs" --version
