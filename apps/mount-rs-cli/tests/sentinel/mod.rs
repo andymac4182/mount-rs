@@ -7,6 +7,7 @@
 use crate::common::*;
 use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -42,6 +43,41 @@ pub struct Security {
     pub sentinel_password: Option<&'static str>,
     pub sentinel_username: Option<&'static str>,
     pub tls: bool,
+}
+
+/// Parse `CLIENT LIST`: the commands of each connection from outside the
+/// container, that is from a mount-rs server (everything inside connects
+/// from a loopback address), by client id.
+fn host_commands(list: &str) -> BTreeMap<String, u64> {
+    list.lines()
+        .filter_map(|line| {
+            let field = |name: &str| {
+                line.split_whitespace()
+                    .find_map(|field| field.strip_prefix(name))
+            };
+            if field("addr=")?.starts_with("127.") {
+                return None;
+            }
+            Some((field("id=")?.to_owned(), field("tot-cmds=")?.parse().ok()?))
+        })
+        .collect()
+}
+
+/// A thread watching for commands from mount-rs servers on one Redis
+/// server; see `Deployment::watch_commands`.
+pub struct Watch {
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<Option<Duration>>,
+}
+
+impl Watch {
+    /// Stop watching. Returns when, after the `since` given, a command was
+    /// last seen arriving (to within one `CLIENT LIST`, about 0.1 to 0.3
+    /// s), or `None` if none arrived while watching.
+    pub fn finish(self) -> Option<Duration> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.join().unwrap()
+    }
 }
 
 /// A running Sentinel deployment, removed on drop.
@@ -262,6 +298,43 @@ impl Deployment {
             })
             .filter(|address| !address.starts_with("127."))
             .count()
+    }
+
+    /// The commands each connection from a mount-rs server to the server
+    /// on `port` has run, by client id.
+    pub fn host_commands(&self, port: &str) -> BTreeMap<String, u64> {
+        host_commands(&self.cli(port, &["CLIENT", "LIST", "TYPE", "normal"]))
+    }
+
+    /// Watch, from a thread, for commands from mount-rs servers reaching
+    /// the server on `port`, from now until the watch is finished.
+    pub fn watch_commands(&self, port: &str, since: Instant) -> Watch {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let mut command = Command::new(FIXTURE);
+        command
+            .arg("cli")
+            .arg(self.state.path())
+            .args([port, "CLIENT", "LIST", "TYPE", "normal"]);
+        let handle = thread::spawn(move || {
+            let sample = |command: &mut Command| {
+                host_commands(&String::from_utf8_lossy(&command.output().unwrap().stdout))
+            };
+            let mut seen = sample(&mut command);
+            let mut last = None;
+            while !stopped.load(Ordering::Relaxed) {
+                let now = sample(&mut command);
+                if now
+                    .iter()
+                    .any(|(id, count)| seen.get(id).is_none_or(|before| count > before))
+                {
+                    last = Some(since.elapsed());
+                }
+                seen = now;
+            }
+            last
+        });
+        Watch { stop, handle }
     }
 
     /// `host:port` of the sentinels on `ports`, for a server's configuration.

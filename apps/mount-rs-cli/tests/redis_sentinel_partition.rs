@@ -25,6 +25,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Longer than an owner's refresh interval: a server that sent nothing to a
+/// Redis server for this long has stopped using it.
+const QUIET: Duration = Duration::from_secs(7);
+
 /// The processes of a deployment, by port.
 struct Ports {
     primary: String,
@@ -126,8 +130,9 @@ fn every_server_leaves_an_isolated_primary_that_still_accepts_writes() {
 
     let direct = observe(owner.address, "before", b"written before".to_vec());
     let forwarded = observe(ingress.address, "before", b"written before".to_vec());
-    deployment.partition(&[&old], &ports.all_but_primary());
     let cut = Instant::now();
+    let commands = deployment.watch_commands(&old, cut);
+    deployment.partition(&[&old], &ports.all_but_primary());
     // Cut off, the old primary still takes writes.
     assert_eq!(
         deployment.cli(&old, &["SET", &probe, "written to the isolated primary"]),
@@ -140,28 +145,20 @@ fn every_server_leaves_an_isolated_primary_that_still_accepts_writes() {
     // It does not know it was replaced.
     assert_eq!(deployment.role(&old), "master");
 
-    // Every server leaves it: its connections from the host close.
-    let mut drops = Vec::new();
-    let mut last = connected;
-    wait_until(
-        "every server to leave the isolated primary",
-        REDIS_FAILOVER_LIMIT,
-        || {
-            let now = deployment.host_clients(&old);
-            if now < last {
-                drops.push(cut.elapsed());
-            }
-            last = now;
-            now == 0
-        },
-    );
-    let left = cut.elapsed();
     wait_until("the route on the new primary", REDIS_FAILOVER_LIMIT, || {
         deployment.route(&new, &cluster.namespace) == Some(published.clone())
     });
     let republished = cut.elapsed();
     write_settled(&ingress, "during", b"written during the split");
     let forwarding = cut.elapsed();
+    // Every server has stopped sending it commands. (A connection a server
+    // has not used since may stay open; it is checked before further use.)
+    thread::sleep(QUIET);
+    let left = commands.finish().unwrap_or_default();
+    assert!(
+        left < forwarding,
+        "a server still used the old primary {left:.1?} after the cut"
+    );
 
     // What a server that still used the old primary would act on: a route
     // for the drive under a later fence, naming another node. An owner
@@ -175,8 +172,9 @@ fn every_server_leaves_an_isolated_primary_that_still_accepts_writes() {
     );
     // More than a refresh interval of the owner and many lookups of the
     // ingress.
+    let commands = deployment.host_commands(&old);
     thread::sleep(Duration::from_secs(6));
-    assert_eq!(deployment.host_clients(&old), 0);
+    assert_eq!(deployment.host_commands(&old), commands);
     assert_eq!(
         deployment.route(&old, &cluster.namespace),
         Some(("b".to_owned(), published.1 + 1))
@@ -209,8 +207,15 @@ fn every_server_leaves_an_isolated_primary_that_still_accepts_writes() {
     assert_eq!(deployment.cli(&new, &["EXISTS", &probe]), "0");
     // Two refresh intervals with the old primary back: nobody returns to
     // it, and the route is still the owner's, under its fence.
+    let commands = deployment.host_commands(&old);
     thread::sleep(Duration::from_secs(11));
-    assert_eq!(deployment.host_clients(&old), 0);
+    let after = deployment.host_commands(&old);
+    assert!(
+        after
+            .iter()
+            .all(|(id, count)| commands.get(id) == Some(count)),
+        "{commands:?} then {after:?}"
+    );
     for sentinel in &ports.sentinels {
         assert_eq!(deployment.named_by(sentinel).as_deref(), Some(new.as_str()));
     }
@@ -236,9 +241,9 @@ fn every_server_leaves_an_isolated_primary_that_still_accepts_writes() {
     owner.assert_running("the owner");
     ingress.assert_running("the ingress");
     eprintln!(
-        "isolated old primary: promoted {promoted:.1?} after the cut; the servers' {connected} \
-         connections to the old primary closed at {drops:.1?}, the last {left:.1?} after the \
-         cut ({:.1?} after the promotion); the owner's route on the new primary after \
+        "isolated old primary: promoted {promoted:.1?} after the cut; the last command from a \
+         server ({connected} connections) reached the old primary {left:.1?} after the cut \
+         ({:.1?} after the promotion); the owner's route on the new primary after \
          {republished:.1?}; a forwarded write succeeded after {forwarding:.1?}; after the \
          heal the old primary was a replica after {demoted:.1?} and had dropped its own writes \
          after {resynced:.1?}; forwarded reads: {} served, {} refused, longest gap {:.1?}; \
@@ -541,34 +546,27 @@ fn servers_that_reach_only_the_old_primary() {
     // The old primary rejoins and becomes a replica; the servers still
     // cannot reach a sentinel. They stop using it, and have no primary.
     let forwarded = observe(ingress.address, "before", b"written before".to_vec());
-    deployment.heal_links();
     let healed = Instant::now();
+    let commands = deployment.watch_commands(&old, healed);
+    deployment.heal_links();
     wait_until(
         "the old primary to become a replica",
         REDIS_FAILOVER_LIMIT,
         || deployment.role(&old) == "slave",
     );
     let demoted = healed.elapsed();
-    let mut closed = None;
     let refused = wait_until(
         "forwarded requests to be refused",
         Duration::from_secs(60),
         || {
-            if closed.is_none() && deployment.host_clients(&old) == 0 {
-                closed = Some(healed.elapsed());
-            }
             matches!(
                 http_within(ingress.address, "GET", "before", b"", Duration::from_secs(15)),
                 Ok((503, _))
             )
         },
     );
-    wait_until(
-        "the servers to stop using the replica",
-        Duration::from_secs(30),
-        || deployment.host_clients(&old) == 0,
-    );
-    let left = healed.elapsed();
+    thread::sleep(QUIET);
+    let left = commands.finish();
     thread::sleep(Duration::from_secs(5));
     let without = finish(forwarded);
 
@@ -596,8 +594,7 @@ fn servers_that_reach_only_the_old_primary() {
         "servers reaching only the old primary: promoted {promoted:.1?} after the cut; the \
          servers stayed on the old primary and forwarding worked through it ({} reads served, \
          {} refused); after the old primary rejoined it was a replica in {demoted:.1?}, the \
-         servers' connections to it closed {closed:.1?} / all by {left:.1?} after the heal \
-         and forwarded requests were refused {refused:.1?} after it was demoted ({} refused, \
+         last command from a server reached it {left:.1?} after the heal and forwarded requests were refused {refused:.1?} after it was demoted ({} refused, \
          {} served meanwhile); with the sentinels back the route was on the new primary in \
          {republished:.1?}; direct reads: {} served, longest gap {:.1?}",
         stayed.ok,
