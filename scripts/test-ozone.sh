@@ -689,6 +689,14 @@ if [ "${MOUNT_RS_OZONE_IOPS:-0}" = "1" ]; then
   export MOUNT_RS_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
   export MOUNT_RS_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
   export MOUNT_RS_R2_DURABLE=1
+  # --flush-writeback: the steps above compile and link the CLI and its
+  # tests and write to Ozone, which can leave a large dirty page cache.
+  # Three CI failures on 2026-11-17/18 were each one window of 1.0-1.5 s in
+  # which every SQLite metadata commit (synchronous=FULL) waited, unlinks
+  # that touch no block storage included, while PGlite, measured second,
+  # never stalled. The runner syncs before each timed window and records
+  # what that drained, the host's I/O pressure during the window and the
+  # slowest operations with their start offsets.
   bounded_node_test "iops" "$repo_dir/benchmarks/storage/runner.mjs" \
     --providers "$iops_providers" \
     --sizes "$iops_size_mib" \
@@ -697,6 +705,7 @@ if [ "${MOUNT_RS_OZONE_IOPS:-0}" = "1" ]; then
     --concurrency "$iops_concurrency" \
     --min-iops "$iops_minimum" \
     --require-configured \
+    --flush-writeback \
     --network-context "ozone-ci" \
     --output "$iops_output"
   node "$repo_dir/scripts/verify-w26-ozone-iops-artifact.mjs" \

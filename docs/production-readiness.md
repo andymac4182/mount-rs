@@ -112,8 +112,40 @@ repeated on `main` after all of them were merged.
 - **Windows** has no disk cache and no delegated SQLite hand-off; tests for
   both are skipped there.
 - **Flaky jobs seen during this work**: `windows-node` (a WebDAV step at its
-  20 s limit) and `ozone-compositions` (an IOPS check). Both pass on rerun
-  and neither was changed.
+  20 s limit), not changed; and `ozone-compositions` (its 1,000-IOPS check),
+  investigated and changed as described below.
+- **The `ozone-compositions` IOPS failures**: three on 2026-11-17/18, all
+  `mount-rs-split-sqlite-r2`, at 672, 695 and 869 IOPS (runs
+  [44166961015](https://github.com/andymac4182/mount-rs/actions/runs/44166961015)
+  attempt 1,
+  [44238156692](https://github.com/andymac4182/mount-rs/actions/runs/44238156692)
+  attempt 1 and
+  [44221575072](https://github.com/andymac4182/mount-rs/actions/runs/44221575072)).
+  Fourteen other runs that day measured SQLite at 2,374 to 9,149 and PGlite
+  at 1,789 to 9,987. Rebuilding each failure's timeline from its raw samples
+  shows one window of 1.0 to 1.5 s inside the measurement, and normal speed
+  before and after it. In that window a whole 64-wide batch of writes
+  finished within a millisecond of each other (at 949, 1,450 and 615 ms),
+  and then the following unlinks did the same. Unlinks only publish SQLite
+  metadata and touch no block storage, so the waiting was on the SQLite
+  connection's thread, which runs commits one at a time with
+  `synchronous=FULL` and a rollback journal, several fsyncs per commit.
+  PGlite, measured second against the same Ozone, never stalled. No
+  operation timed out or failed, the stalled unlinks rule out the S3
+  client's retries, and the SQLite provider's own busy retry (a 250 µs to
+  20 ms backoff, for contention between connections, of which this
+  provider opens one) is far too short. The most likely cause is fsync latency on the runner's disk right
+  after the job compiled, linked and wrote to Ozone. That has not been
+  shown directly: the artifacts carry no host I/O data. The runner now
+  takes `--flush-writeback`, which the Ozone gate passes. It runs `sync`
+  before each timed window, so the window does not also pay to write back
+  what earlier steps left in the page cache. Each result records what the
+  sync drained, the host's I/O, CPU and memory pressure-stall time across
+  the window, each operation's start offset and the slowest operations,
+  and a result below target prints a `STORAGE_IOPS_SLOW` line. The 1,000
+  threshold, the workload and the harness's refusal of a lower minimum are
+  unchanged. If the gate fails again, that record says whether the host
+  stalled.
 - **Linux-only behaviour** was verified in a container for FUSE and 9P only.
   The other changes were tested on macOS and by CI.
 
@@ -226,6 +258,12 @@ changed. The September figures predate the metadata work of 2026-09-24
 change moved the figure was not determined. The passing runs differ by a
 factor of 2.8 on shared runners, so the gate has margin, but the figure is
 not a capacity number.
+
+The `ozone-compositions` job runs the same workload for SQLite and PGlite
+metadata over Ozone and has its own history of failures; see "Remaining
+risk". Its gate syncs the host's page cache before each timed window
+(`--flush-writeback`). This gate does not: its metadata is in TiDB, not in
+a local file with a synchronous commit, and it has not failed this way.
 
 The same workload has not been measured with RustFS blocks: the
 `tidb-rustfs` job runs a 64-operation soak, not this benchmark. The gate
