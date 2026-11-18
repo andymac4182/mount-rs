@@ -588,10 +588,13 @@ long.
 - **Redis Cluster.** The registry talks to one Redis server, or to the
   primary of a Redis Sentinel deployment. There is no cluster redirection
   in the client: a Redis Cluster endpoint is not supported and not tested.
-- **A partition inside a Redis Sentinel deployment**, Redis hosts whose
-  clocks differ, and sentinels added or removed while servers run (the
-  sentinel list is read from the configuration at startup) are not tested;
-  see [Redis Sentinel](#redis-sentinel).
+- **Redis hosts whose clocks differ**, and sentinels added or removed
+  while servers run (the sentinel list is read from the configuration at
+  startup), are not tested. Partitions inside a Redis Sentinel deployment
+  are tested, with the limits listed under
+  [Redis Sentinel](#redis-sentinel): during a split brain, forwarded
+  requests on the side without the route get `503` for as long as the
+  split lasts.
 - **A standby's attempt on SQLite metadata takes the write lock but writes
   nothing.** Opening the metadata store checks the schema and tries the
   lease in `BEGIN IMMEDIATE` transactions, so an attempt waits for, and

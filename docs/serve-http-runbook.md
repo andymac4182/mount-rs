@@ -1320,7 +1320,7 @@ in the CLI README. For operation:
 | One primary | With `redis_url` each server connects to the single address in its URL and reconnects to that same address. With `redis_sentinel` it finds the primary through the sentinels and finds the new one after a failover; see [Redis Sentinel](#redis-sentinel). **Redis Cluster is not supported.** |
 | TLS | `rediss://` for any Redis not on the same host. The certificate must chain to the system roots or `redis_ca` and name the host in the URL. Verification cannot be turned off. Client certificates are not supported. |
 | Plaintext | `redis://` is accepted only to loopback, unless `allow_plaintext_redis: true`. |
-| Authentication | In the URL. This ACL is enough without failover, and is the one the TLS test uses: `~mount-rs:* +eval +getrange +get +set +del +pexpire +strlen +ping +client\|setinfo`. Failover also runs `TIME`, `ZADD`, `ZCARD`, `ZSCORE`, `ZRANGE`, `ZREM` and `ZREMRANGEBYSCORE` on keys under the same prefix; add `+time +zadd +zcard +zscore +zrange +zrem +zremrangebyscore`. That longer rule is read from the code and is **not** covered by a test: failover is tested with the default user. |
+| Authentication | In the URL. This ACL is enough without failover, and is the one the TLS test uses: `~mount-rs:* +eval +getrange +get +set +del +pexpire +strlen +ping +client\|setinfo`. Failover also runs `TIME`, `ZADD`, `ZCARD`, `ZSCORE`, `ZRANGE`, `ZREM` and `ZREMRANGEBYSCORE` on keys under the same prefix; add `+time +zadd +zcard +zscore +zrange +zrem +zremrangebyscore`. That longer rule, with `+role` added, is tested on a Sentinel deployment (see [Redis Sentinel](#redis-sentinel)): failover candidates logged in with nothing more ran publication, forwarding, a Redis failover and a drive failover, and Redis refused none of their commands. With `redis_url` and failover it is not tested separately; the commands are the same except `ROLE`. |
 | Persistence | Not needed. A Redis that comes back empty is refilled by the owners within seconds. |
 | Reachable at startup | A server connects, logs in and pings within 5 seconds before it reports listening. It cannot start while Redis is unreachable (exit code 1). |
 | Namespace | Keys are `mount-rs:<namespace>:...`. Give each cluster its own. |
@@ -1407,10 +1407,26 @@ Deploying:
    survive the loss of one server.
 
 An ACL user for the Redis servers needs `+role` in addition to the rule
-under Redis above, and one for the sentinels needs
-`+sentinel|get-master-addr-by-name +client|setinfo`. Both are read from the
-code and **not** covered by a test: the tests use the default user with a
-password.
+under Redis above (with failover, the longer one), and one for the
+sentinels needs `+sentinel|get-master-addr-by-name +client|setinfo`:
+
+```
+# on every Redis server (ACL users are not replicated)
+ACL SETUSER mount-rs on >PASSWORD ~mount-rs:* +eval +getrange +get +set +del +pexpire +strlen +ping +client|setinfo +time +zadd +zcard +zscore +zrange +zrem +zremrangebyscore +role
+# on every sentinel
+ACL SETUSER mount-rs-sentinel on >PASSWORD +sentinel|get-master-addr-by-name +client|setinfo
+```
+
+Set `username` and `sentinel_username` to these users. Tested by
+`acl_users_with_only_the_documented_rules_are_enough` in
+`apps/mount-rs-cli/tests/redis_sentinel.rs`: two failover candidates and an
+ingress logged in as exactly these users, published, forwarded, announced
+themselves, rode out a failover of the Redis primary and then a failover
+of the drive, and `ACL LOG` on every Redis server and sentinel stayed
+empty. A user without `+role` cannot start (exit status 1). Put the users
+in each server's ACL file (or configuration) so that they survive a
+restart; a replica promoted by the sentinels needs them before it becomes
+the primary.
 
 At startup a server asks the sentinels for the primary, connects and logs
 in to it, and requires it to report the `master` role, before it reports
@@ -1449,12 +1465,45 @@ design):
 - The old primary, when it returns, is made a replica by the sentinels and
   loses whatever it accepted while cut off. Servers do not go back to it.
 
+**What a partition inside the deployment does** (measured with real
+servers by `apps/mount-rs-cli/tests/redis_sentinel_partition.rs`; the
+details are under "Partitions inside the Redis deployment" in the failover
+design):
+
+- **An old primary cut off from the sentinels and replicas, but still
+  reachable and still accepting writes:** every server stops using it
+  within about a second of the sentinels promoting a replica (0.2 s in the
+  test). What was written to it alone is discarded when it rejoins as a
+  replica, and is never read meanwhile.
+- **Split brain** (some servers can reach only a sentinel left with the old
+  primary, others only the sentinels that promoted a replica): the two
+  groups read different registries for as long as the split lasts. An
+  owner on the old side keeps serving its drives and its own listener;
+  the other side has no route for those drives, so requests forwarded
+  there get `503`, and a standby there tries the drive and gets `EAGAIN`
+  (`lease_held`): the lease in storage keeps one owner. No drive changed
+  owner and no fence changed in the test. Routes converge within a
+  refresh interval of the heal (4.5 s in the test). List every sentinel on
+  every server, so that a server is cut off from the majority only when
+  the network really cuts it off.
+- **Servers cut off from the primary while the sentinels are not:** a
+  Redis outage, as above. Nothing fails over.
+- **Servers that reach only the old primary:** they keep using it, all
+  together, so forwarding keeps working through it; once it rejoins as a
+  replica they stop using it, and until they can reach a sentinel again
+  forwarded requests get `503`.
+
 **Limits.** Redis Cluster is not supported. The sentinel list is fixed at
 startup: after replacing sentinels, update the configuration and restart
-the servers one at a time. Not tested: a network partition inside the
-Redis deployment (as opposed to a killed primary), Redis hosts with
-different clocks, an ACL user, sentinels reporting host names, and a
-managed service's Sentinel-compatible endpoint.
+the servers one at a time. Not tested: Redis hosts with different clocks
+(the test deployment runs in one container), sentinels reporting host
+names, and a managed service's Sentinel-compatible endpoint. The partition
+tests run every Redis process in one container on one host and cut links
+with iptables; the host side of a cut applies to every mount-rs server at
+once, and each server's view of the sentinels in the split-brain test is
+made by its sentinel list. The reverse split (the owner on the majority
+side, a standby with the old primary) and an owner dying during a split
+are reasoned about in the failover design, not tested.
 
 ### Placement and failover
 
@@ -1700,8 +1749,12 @@ Stated plainly. None of these is hidden behind a feature flag.
    A peer of an incompatible protocol version is refused with `503`, not
    misread.
 5. **Redis high availability means Redis Sentinel.** A failover of the
-   primary is tested with a killed primary and three sentinels; a
-   partition inside the Redis deployment is not. Redis Cluster is not
+   primary is tested with a killed primary and three sentinels, and
+   partitions inside the deployment are tested (an isolated old primary
+   that still accepts writes, a split brain with failover candidates on
+   both sides, servers cut off from the primary or from the sentinels).
+   During a split brain, requests forwarded on the side without the route
+   get `503` for as long as the split lasts. Redis Cluster is not
    supported. During a Redis failover forwarded requests get `503` for as
    long as the sentinels take, and for up to 5 seconds after it a route can
    be missing or name the previous owner; see
@@ -1744,7 +1797,8 @@ Stated plainly. None of these is hidden behind a feature flag.
     died**, and is then unavailable for about 15 seconds.
 18. **Not exercised by any test:** a network partition of the
     server-to-server (peer) link, as opposed to a server cut off from
-    Redis, which is tested; failover with a restricted Redis ACL user;
+    Redis, which is tested; failover with a restricted Redis ACL user on
+    a single Redis server (`redis_url`; it is tested on Sentinel);
     more than a handful of servers; and `http2_prior_knowledge` together with cluster
     features. The rest of what failover leaves out is listed under "Not
     handled" in [`serve-http-failover.md`](serve-http-failover.md#not-handled).
