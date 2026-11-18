@@ -123,6 +123,10 @@ enum ConsoleEvent {
     CtrlC,
     CtrlBreak,
     Close,
+    /// Never constructed outside tests: `shutdown_signal` does not listen
+    /// for logoff at all, because Tokio's handler would then hold the event
+    /// (it never returns from a logoff) instead of letting Windows carry on.
+    #[cfg_attr(windows, allow(dead_code))]
     Logoff,
     Shutdown,
 }
