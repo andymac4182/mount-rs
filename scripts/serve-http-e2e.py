@@ -24,6 +24,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -51,7 +52,7 @@ def check(name, ok, detail=""):
         failures.append(name)
 
 
-def write_config(name="http.json", timeout_ms=5000):
+def write_config(name="http.json", timeout_ms=5000, upload=UPLOAD):
     os.makedirs(os.path.join(WORK, "state"), exist_ok=True)
     cfg = {
         "version": 1,
@@ -59,7 +60,7 @@ def write_config(name="http.json", timeout_ms=5000):
             "host": "127.0.0.1",
             "port": 0,
             "max_request_bytes": CAP,
-            "max_upload_bytes": UPLOAD,
+            "max_upload_bytes": upload,
             "max_directory_entries": ENTRIES,
             "request_timeout_ms": timeout_ms,
             "drain_timeout_ms": timeout_ms,
@@ -301,31 +302,34 @@ def console_close_checks(config):
     check("data survives console close", s == 200 and d == marker, s)
     stop(proc)
 
-    # A request that has sent part of its body and then waits holds the
-    # drain open for as long as the drain and request limits allow: 60 s
-    # here, far beyond the 5 s Windows waits after a console close. The
-    # server must cut the drain short and release the drive before then.
-    long_config = write_config("http-long-drain.json", 60_000)
+    # A client that has stopped reading a download holds the drain open
+    # for as long as the drain and request limits allow: 60 s here, far
+    # beyond the 5 s Windows waits after a console close. (An upload still
+    # being received does not: it is answered 503 at once.) The server must
+    # cut the drain short and release the drive before Windows ends it.
+    big = 64 << 20
+    long_config = write_config("http-long-drain.json", 60_000, upload=big)
     proc, PORT = start(long_config)
-    stalled = http.client.HTTPConnection("127.0.0.1", PORT, timeout=60)
-    stalled.putrequest("PUT", FS + "/stalled")
-    stalled.putheader("Authorization", f"Bearer {TOKEN}")
-    stalled.putheader("Content-Length", str(CAP // 2))
-    stalled.endheaders()
-    stalled.send(b"x" * 4096)
-    time.sleep(0.5)
+    s, _, _ = req("PUT", FS + "/large", os.urandom(big))
+    check("put a 64 MiB file", s == 200, s)
+    stalled = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    stalled.connect(("127.0.0.1", PORT))
+    stalled.sendall((f"GET {FS}/large HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                     f"Authorization: Bearer {TOKEN}\r\n\r\n").encode())
+    head = stalled.recv(1024)
+    check("stalled download started", head.startswith(b"HTTP/1.1 200"), head[:40])
+    time.sleep(1)
     code, took = close_console(proc)
     stalled.close()
     killed = code == STATUS_CONTROL_C_EXIT or isinstance(code, str)
-    check("console close mid-request: exits by itself within 5 s", not killed and took < 5,
-          (shown(code), f"{took:.2f}s"))
-    check("console close mid-request: says the drain was cut short",
+    check("console close mid-download: exits 1 by itself within 5 s",
+          code == 1 and not killed and took < 5, (shown(code), f"{took:.2f}s"))
+    check("console close mid-download: says the drain was cut short",
           any("drain cut short" in line for line in proc.err), proc.err[-3:])
-    proc = restart_after_close(config, "console close mid-request")
+    proc = restart_after_close(config, "console close mid-download")
     s, _, d = req("GET", FS + "/console-close")
-    check("data survives console close mid-request", s == 200 and d == marker, s)
-    s, _, _ = req("GET", FS + "/stalled")
-    check("unfinished upload is not stored", s == 404, s)
+    check("data survives console close mid-download", s == 200 and d == marker, s)
     stop(proc)
 
 
